@@ -32,7 +32,14 @@ struct HistoryView: View {
         }
         .navigationTitle("Execution History")
         .toolbar {
-            ToolbarItem {
+            ToolbarItemGroup {
+                Button {
+                    Task { await loadHistory() }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .help("Refresh execution history")
+
                 Button(role: .destructive) {
                     showClearConfirmation = true
                 } label: {

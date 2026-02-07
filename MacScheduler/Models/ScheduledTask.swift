@@ -116,6 +116,12 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
         status.state == .enabled || status.state == .running
     }
 
+    // Sortable key paths for Table columns
+    var statusName: String { status.state.rawValue }
+    var triggerTypeName: String { trigger.type.rawValue }
+    var backendName: String { backend.rawValue }
+    var lastRunDate: Date { status.lastRun ?? .distantPast }
+
     func validate() -> [String] {
         if isExternal {
             return []

@@ -36,6 +36,7 @@ struct TriggerEditorView: View {
                     Text(type.rawValue).tag(type)
                 }
             }
+            .help(scheduleTypeTooltip)
             .onChange(of: scheduleType) { _, newValue in
                 updateDefaults(for: newValue)
             }
@@ -49,32 +50,28 @@ struct TriggerEditorView: View {
             case .hourly:
                 HStack {
                     Text("At minute")
-                    Picker("Minute", selection: $minute) {
-                        ForEach(0..<60) { m in
-                            Text(String(format: "%02d", m)).tag(m)
-                        }
-                    }
-                    .frame(width: 80)
+                    TextField("00", value: $minute, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .help("The minute of each hour when the task runs (0-59)")
                     Text("of every hour")
+                        .foregroundColor(.secondary)
                 }
 
             case .daily:
                 HStack {
                     Text("At")
-                    Picker("Hour", selection: $hour) {
-                        ForEach(0..<24) { h in
-                            Text(String(format: "%02d", h)).tag(h)
-                        }
-                    }
-                    .frame(width: 80)
+                    TextField("00", value: $hour, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .help("Hour of the day in 24-hour format (0-23)")
                     Text(":")
-                    Picker("Minute", selection: $minute) {
-                        ForEach(0..<60) { m in
-                            Text(String(format: "%02d", m)).tag(m)
-                        }
-                    }
-                    .frame(width: 80)
+                    TextField("00", value: $minute, format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 60)
+                        .help("Minute of the hour (0-59)")
                     Text("every day")
+                        .foregroundColor(.secondary)
                 }
 
             case .weekly:
@@ -89,24 +86,21 @@ struct TriggerEditorView: View {
                                 Text(weekdays[d]).tag(d)
                             }
                         }
-                        .frame(width: 120)
+                        .frame(width: 140)
+                        .help("Day of the week when the task runs")
                     }
 
                     HStack {
                         Text("At")
-                        Picker("Hour", selection: $hour) {
-                            ForEach(0..<24) { h in
-                                Text(String(format: "%02d", h)).tag(h)
-                            }
-                        }
-                        .frame(width: 80)
+                        TextField("00", value: $hour, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .help("Hour of the day in 24-hour format (0-23)")
                         Text(":")
-                        Picker("Minute", selection: $minute) {
-                            ForEach(0..<60) { m in
-                                Text(String(format: "%02d", m)).tag(m)
-                            }
-                        }
-                        .frame(width: 80)
+                        TextField("00", value: $minute, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .help("Minute of the hour (0-59)")
                     }
                 }
 
@@ -114,33 +108,28 @@ struct TriggerEditorView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Text("On day")
-                        Picker("Day", selection: Binding(
+                        TextField("1", value: Binding(
                             get: { day ?? 1 },
                             set: { day = $0 }
-                        )) {
-                            ForEach(1...31, id: \.self) { d in
-                                Text("\(d)").tag(d)
-                            }
-                        }
-                        .frame(width: 80)
+                        ), format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .help("Day of the month when the task runs (1-31)")
                         Text("of every month")
+                            .foregroundColor(.secondary)
                     }
 
                     HStack {
                         Text("At")
-                        Picker("Hour", selection: $hour) {
-                            ForEach(0..<24) { h in
-                                Text(String(format: "%02d", h)).tag(h)
-                            }
-                        }
-                        .frame(width: 80)
+                        TextField("00", value: $hour, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .help("Hour of the day in 24-hour format (0-23)")
                         Text(":")
-                        Picker("Minute", selection: $minute) {
-                            ForEach(0..<60) { m in
-                                Text(String(format: "%02d", m)).tag(m)
-                            }
-                        }
-                        .frame(width: 80)
+                        TextField("00", value: $minute, format: .number)
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 60)
+                            .help("Minute of the hour (0-59)")
                     }
                 }
 
@@ -157,23 +146,19 @@ struct TriggerEditorView: View {
             HStack {
                 Text("Minute:")
                     .frame(width: 80, alignment: .leading)
-                Picker("Minute", selection: $minute) {
-                    ForEach(0..<60) { m in
-                        Text(String(format: "%02d", m)).tag(m)
-                    }
-                }
-                .frame(width: 80)
+                TextField("0-59", value: $minute, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                    .help("Minute of the hour when the task runs (0-59)")
             }
 
             HStack {
                 Text("Hour:")
                     .frame(width: 80, alignment: .leading)
-                Picker("Hour", selection: $hour) {
-                    ForEach(0..<24) { h in
-                        Text(String(format: "%02d", h)).tag(h)
-                    }
-                }
-                .frame(width: 80)
+                TextField("0-23", value: $hour, format: .number)
+                    .textFieldStyle(.roundedBorder)
+                    .frame(width: 70)
+                    .help("Hour of the day in 24-hour format (0-23)")
             }
 
             HStack {
@@ -183,16 +168,15 @@ struct TriggerEditorView: View {
                     get: { day != nil },
                     set: { day = $0 ? 1 : nil }
                 ))
+                .help("Enable to restrict the task to a specific day of the month")
                 if day != nil {
-                    Picker("Day", selection: Binding(
+                    TextField("1-31", value: Binding(
                         get: { day ?? 1 },
                         set: { day = $0 }
-                    )) {
-                        ForEach(1...31, id: \.self) { d in
-                            Text("\(d)").tag(d)
-                        }
-                    }
-                    .frame(width: 80)
+                    ), format: .number)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 70)
+                        .help("Day of the month (1-31)")
                 }
             }
 
@@ -203,6 +187,7 @@ struct TriggerEditorView: View {
                     get: { weekday != nil },
                     set: { weekday = $0 ? 0 : nil }
                 ))
+                .help("Enable to restrict the task to a specific day of the week")
                 if weekday != nil {
                     Picker("Weekday", selection: Binding(
                         get: { weekday ?? 0 },
@@ -212,7 +197,8 @@ struct TriggerEditorView: View {
                             Text(weekdays[d]).tag(d)
                         }
                     }
-                    .frame(width: 120)
+                    .frame(width: 140)
+                    .help("Day of the week when the task runs")
                 }
             }
 
@@ -223,6 +209,7 @@ struct TriggerEditorView: View {
                     get: { month != nil },
                     set: { month = $0 ? 1 : nil }
                 ))
+                .help("Enable to restrict the task to a specific month")
                 if month != nil {
                     Picker("Month", selection: Binding(
                         get: { month ?? 1 },
@@ -232,7 +219,8 @@ struct TriggerEditorView: View {
                             Text(months[m - 1]).tag(m)
                         }
                     }
-                    .frame(width: 120)
+                    .frame(width: 140)
+                    .help("Month when the task runs")
                 }
             }
         }
@@ -258,6 +246,17 @@ struct TriggerEditorView: View {
             month: month
         )
         return schedule.displayString
+    }
+
+    private var scheduleTypeTooltip: String {
+        switch scheduleType {
+        case .everyMinute: return "Run the task once every minute"
+        case .hourly: return "Run the task once per hour at a specific minute"
+        case .daily: return "Run the task once per day at a specific time"
+        case .weekly: return "Run the task once per week on a specific day and time"
+        case .monthly: return "Run the task once per month on a specific day and time"
+        case .custom: return "Configure each schedule field individually"
+        }
     }
 
     private func updateDefaults(for type: ScheduleType) {

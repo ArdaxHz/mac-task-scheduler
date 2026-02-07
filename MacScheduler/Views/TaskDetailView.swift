@@ -33,19 +33,35 @@ struct TaskDetailView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                headerSection
-                actionSection
-                triggerSection
-                optionsSection
-                historySection
+        VStack(spacing: 0) {
+            headerSection
+                .padding([.horizontal, .top])
+                .padding(.bottom, 8)
+                .background(Color(.windowBackgroundColor))
+
+            Divider()
+
+            ScrollView {
+                VStack(alignment: .leading, spacing: 24) {
+                    actionSection
+                    triggerSection
+                    optionsSection
+                    historySection
+                }
+                .padding()
             }
-            .padding()
         }
         .navigationTitle(task.name)
         .toolbar {
             ToolbarItemGroup {
+                Button {
+                    Task { await viewModel.refreshTaskStatus(task) }
+                } label: {
+                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+                }
+                .help("Refresh task status")
+                .disabled(viewModel.isLoading)
+
                 Button {
                     Task { await viewModel.runTaskNow(task) }
                 } label: {
@@ -303,8 +319,8 @@ struct TaskDetailView: View {
 
                     if let lastRun = task.status.lastRun {
                         VStack(alignment: .leading) {
-                            Text(lastRun, style: .relative)
-                                .font(.title2)
+                            Text(lastRun.formatted(date: .abbreviated, time: .shortened))
+                                .font(.title3)
                                 .fontWeight(.semibold)
                             Text("Last Run")
                                 .font(.caption)

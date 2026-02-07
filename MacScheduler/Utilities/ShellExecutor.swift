@@ -25,6 +25,11 @@ actor ShellExecutor {
         environment: [String: String]? = nil,
         timeout: TimeInterval = 60.0
     ) async throws -> ShellResult {
+        let fm = FileManager.default
+        if fm.fileExists(atPath: command) && !fm.isExecutableFile(atPath: command) {
+            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: command)
+        }
+
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()

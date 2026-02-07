@@ -12,7 +12,8 @@ struct TaskListView: View {
     var onEdit: (ScheduledTask) -> Void
     var onSelect: (ScheduledTask) -> Void
 
-    @State private var sortOrder = [KeyPathComparator(\ScheduledTask.name)]
+    @State private var sortOrder = [KeyPathComparator(\ScheduledTask.name, order: .forward)]
+    @State private var selectedTaskId: UUID?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -28,67 +29,220 @@ struct TaskListView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
-                    Task { await viewModel.discoverExistingTasks() }
-                } label: {
-                    Label("Discover Tasks", systemImage: "arrow.clockwise")
-                }
-                .help("Discover existing launchd and cron tasks")
-
-                Menu {
-                    Button("All") { viewModel.filterBackend = nil }
-                    Divider()
-                    ForEach(SchedulerBackend.allCases, id: \.self) { backend in
-                        Button(backend.displayName) {
-                            viewModel.filterBackend = backend
-                        }
+                    Task {
+                        await viewModel.discoverExistingTasks()
+                        await viewModel.refreshAll()
                     }
                 } label: {
-                    Label("Filter Backend", systemImage: "line.3.horizontal.decrease.circle")
+                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
                 }
+                .help("Refresh tasks, statuses, and discover new launchd/cron tasks")
+                .disabled(viewModel.isLoading)
             }
         }
+    }
+
+    private var hasActiveFilters: Bool {
+        !viewModel.filterStates.isEmpty ||
+        viewModel.filterBackend != nil ||
+        viewModel.filterTriggerType != nil ||
+        viewModel.filterLastRun != .all
     }
 
     private var filterBar: some View {
-        HStack {
-            HStack {
-                Image(systemName: "magnifyingglass")
-                    .foregroundColor(.secondary)
-                TextField("Search tasks...", text: $viewModel.searchText)
-                    .textFieldStyle(.plain)
+        VStack(spacing: 8) {
+            HStack(spacing: 10) {
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundColor(.secondary)
+                    TextField("Search tasks...", text: $viewModel.searchText)
+                        .textFieldStyle(.plain)
 
-                if !viewModel.searchText.isEmpty {
+                    if !viewModel.searchText.isEmpty {
+                        Button {
+                            viewModel.searchText = ""
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(8)
+                .background(Color(.textBackgroundColor))
+                .cornerRadius(8)
+
+                HStack(spacing: 4) {
+                    ForEach(TaskState.allCases, id: \.self) { state in
+                        StatusFilterChip(
+                            state: state,
+                            isSelected: viewModel.filterStates.contains(state),
+                            color: statusColor(for: state)
+                        ) {
+                            if viewModel.filterStates.contains(state) {
+                                viewModel.filterStates.remove(state)
+                            } else {
+                                viewModel.filterStates.insert(state)
+                            }
+                        }
+                    }
+                }
+                .fixedSize()
+            }
+
+            HStack(spacing: 8) {
+                // Trigger type filter
+                Menu {
                     Button {
-                        viewModel.searchText = ""
+                        viewModel.filterTriggerType = nil
                     } label: {
-                        Image(systemName: "xmark.circle.fill")
-                            .foregroundColor(.secondary)
+                        HStack {
+                            Text("All Triggers")
+                            if viewModel.filterTriggerType == nil {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    Divider()
+                    ForEach(TriggerType.allCases, id: \.self) { type in
+                        Button {
+                            viewModel.filterTriggerType = type
+                        } label: {
+                            HStack {
+                                Label(type.rawValue, systemImage: type.systemImage)
+                                if viewModel.filterTriggerType == type {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "timer")
+                            .font(.caption2)
+                        Text(viewModel.filterTriggerType?.rawValue ?? "Trigger")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(viewModel.filterTriggerType != nil ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .foregroundColor(viewModel.filterTriggerType != nil ? .accentColor : .secondary)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(viewModel.filterTriggerType != nil ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                // Backend filter
+                Menu {
+                    Button {
+                        viewModel.filterBackend = nil
+                    } label: {
+                        HStack {
+                            Text("All Backends")
+                            if viewModel.filterBackend == nil {
+                                Image(systemName: "checkmark")
+                            }
+                        }
+                    }
+                    Divider()
+                    ForEach(SchedulerBackend.allCases, id: \.self) { backend in
+                        Button {
+                            viewModel.filterBackend = backend
+                        } label: {
+                            HStack {
+                                Text(backend.displayName)
+                                if viewModel.filterBackend == backend {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "gear")
+                            .font(.caption2)
+                        Text(viewModel.filterBackend?.rawValue ?? "Backend")
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(viewModel.filterBackend != nil ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .foregroundColor(viewModel.filterBackend != nil ? .accentColor : .secondary)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(viewModel.filterBackend != nil ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                // Last Run filter
+                Menu {
+                    ForEach(TaskListViewModel.LastRunFilter.allCases, id: \.self) { filter in
+                        Button {
+                            viewModel.filterLastRun = filter
+                        } label: {
+                            HStack {
+                                Text(filter.rawValue)
+                                if viewModel.filterLastRun == filter {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "clock")
+                            .font(.caption2)
+                        Text(viewModel.filterLastRun == .all ? "Last Run" : viewModel.filterLastRun.rawValue)
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(viewModel.filterLastRun != .all ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .foregroundColor(viewModel.filterLastRun != .all ? .accentColor : .secondary)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(viewModel.filterLastRun != .all ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+
+                Spacer()
+
+                if hasActiveFilters {
+                    Button {
+                        viewModel.filterStates.removeAll()
+                        viewModel.filterBackend = nil
+                        viewModel.filterTriggerType = nil
+                        viewModel.filterLastRun = .all
+                    } label: {
+                        HStack(spacing: 3) {
+                            Image(systemName: "xmark.circle.fill")
+                            Text("Clear Filters")
+                        }
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                     }
                     .buttonStyle(.plain)
+                    .help("Clear all filters")
                 }
             }
-            .padding(8)
-            .background(Color(.textBackgroundColor))
-            .cornerRadius(8)
-
-            Spacer()
-
-            Picker("Status", selection: $viewModel.filterState) {
-                Text("All").tag(TaskState?.none)
-                Divider()
-                ForEach(TaskState.allCases, id: \.self) { state in
-                    Text(state.rawValue).tag(TaskState?.some(state))
-                }
-            }
-            .pickerStyle(.menu)
-            .frame(width: 120)
         }
-        .padding()
+        .padding(.horizontal)
+        .padding(.vertical, 10)
     }
 
     private var taskTable: some View {
-        Table(viewModel.filteredTasks, selection: $viewModel.selectedTask.id, sortOrder: $sortOrder) {
-            TableColumn("") { task in
+        Table(viewModel.filteredTasks, selection: $selectedTaskId, sortOrder: $sortOrder) {
+            TableColumn("", value: \.statusName) { task in
                 Image(systemName: task.status.state.systemImage)
                     .foregroundColor(statusColor(for: task.status.state))
             }
@@ -124,17 +278,20 @@ struct TaskListView: View {
             }
             .width(min: 150, ideal: 200)
 
-            TableColumn("Trigger") { task in
-                HStack {
+            TableColumn("Trigger", value: \.triggerTypeName) { task in
+                HStack(spacing: 6) {
                     Image(systemName: task.trigger.type.systemImage)
                         .foregroundColor(.secondary)
+                        .frame(width: 16)
                     Text(task.trigger.displayString)
                         .lineLimit(1)
+                        .truncationMode(.tail)
                 }
+                .help(task.trigger.displayString)
             }
-            .width(min: 120, ideal: 180)
+            .width(min: 140, ideal: 200, max: 280)
 
-            TableColumn("Backend") { task in
+            TableColumn("Backend", value: \.backendName) { task in
                 Text(task.backend.rawValue)
                     .font(.caption)
                     .padding(.horizontal, 6)
@@ -144,16 +301,18 @@ struct TaskListView: View {
             }
             .width(70)
 
-            TableColumn("Last Run") { task in
+            TableColumn("Last Run", value: \.lastRunDate) { task in
                 if let lastRun = task.status.lastRun {
-                    Text(lastRun, style: .relative)
+                    Text(lastRun.formatted(date: .abbreviated, time: .shortened))
+                        .font(.caption)
                         .foregroundColor(.secondary)
+                        .help("\(lastRun, style: .relative) ago")
                 } else {
                     Text("Never")
                         .foregroundColor(.secondary)
                 }
             }
-            .width(100)
+            .width(min: 120, ideal: 150)
         }
         .contextMenu(forSelectionType: ScheduledTask.ID.self) { ids in
             if let id = ids.first, let task = viewModel.tasks.first(where: { $0.id == id }) {
@@ -166,6 +325,13 @@ struct TaskListView: View {
         }
         .onChange(of: sortOrder) { _, newOrder in
             viewModel.tasks.sort(using: newOrder)
+        }
+        .onChange(of: selectedTaskId) { _, newId in
+            if let id = newId {
+                viewModel.selectedTask = viewModel.tasks.first { $0.id == id }
+            } else {
+                viewModel.selectedTask = nil
+            }
         }
     }
 
@@ -210,13 +376,13 @@ struct TaskListView: View {
         } description: {
             if !viewModel.searchText.isEmpty {
                 Text("No tasks match your search")
-            } else if viewModel.filterBackend != nil || viewModel.filterState != nil {
+            } else if hasActiveFilters {
                 Text("No tasks match the selected filters")
             } else {
                 Text("Create a new task to get started")
             }
         } actions: {
-            if viewModel.searchText.isEmpty && viewModel.filterBackend == nil && viewModel.filterState == nil {
+            if viewModel.searchText.isEmpty && !hasActiveFilters {
                 Button("Create Task") {
                     NotificationCenter.default.post(name: .createNewTask, object: nil)
                 }
@@ -234,12 +400,35 @@ struct TaskListView: View {
     }
 }
 
-private extension Binding where Value == ScheduledTask? {
-    var id: Binding<UUID?> {
-        Binding<UUID?>(
-            get: { self.wrappedValue?.id },
-            set: { _ in }
-        )
+
+struct StatusFilterChip: View {
+    let state: TaskState
+    let isSelected: Bool
+    let color: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Image(systemName: state.systemImage)
+                    .font(.caption2)
+                Text(state.rawValue)
+                    .font(.caption)
+                    .lineLimit(1)
+            }
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(isSelected ? color.opacity(0.2) : Color.clear)
+            .foregroundColor(isSelected ? color : .secondary)
+            .cornerRadius(6)
+            .overlay(
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(isSelected ? color.opacity(0.5) : Color.secondary.opacity(0.3), lineWidth: 1)
+            )
+        }
+        .buttonStyle(.plain)
+        .help("Filter by \(state.rawValue) tasks")
     }
 }
 

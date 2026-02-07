@@ -26,6 +26,7 @@ struct MainView: View {
         } detail: {
             detailView
         }
+        .toolbar(removing: .sidebarToggle)
         .sheet(isPresented: $showingEditor) {
             TaskEditorView(task: editingTask) { task in
                 if editingTask != nil {
@@ -50,33 +51,37 @@ struct MainView: View {
     private var sidebar: some View {
         List(selection: $selectedNavItem) {
             Section("Tasks") {
-                NavigationLink(value: NavigationItem.allTasks) {
-                    Label("All Tasks", systemImage: "list.bullet")
-                }
-                .badge(viewModel.tasks.count)
+                Label("All Tasks", systemImage: "list.bullet")
+                    .badge(viewModel.tasks.count)
+                    .tag(NavigationItem.allTasks)
             }
 
             Section("Activity") {
-                NavigationLink(value: NavigationItem.history) {
-                    Label("History", systemImage: "clock.arrow.circlepath")
-                }
+                Label("History", systemImage: "clock.arrow.circlepath")
+                    .tag(NavigationItem.history)
             }
 
             Section("Status") {
-                HStack {
-                    Label("Enabled", systemImage: "checkmark.circle.fill")
-                        .foregroundColor(.green)
-                    Spacer()
-                    Text("\(viewModel.enabledTaskCount)")
-                        .foregroundColor(.secondary)
-                }
-
-                HStack {
-                    Label("Disabled", systemImage: "pause.circle.fill")
-                        .foregroundColor(.secondary)
-                    Spacer()
-                    Text("\(viewModel.disabledTaskCount)")
-                        .foregroundColor(.secondary)
+                ForEach(TaskState.allCases, id: \.self) { state in
+                    Button {
+                        if viewModel.filterStates.contains(state) {
+                            viewModel.filterStates.remove(state)
+                        } else {
+                            viewModel.filterStates.insert(state)
+                        }
+                        selectedNavItem = .allTasks
+                    } label: {
+                        HStack {
+                            Image(systemName: viewModel.filterStates.contains(state) ? "checkmark.square.fill" : "square")
+                                .foregroundColor(viewModel.filterStates.contains(state) ? statusColor(for: state) : .secondary)
+                            Label(state.rawValue, systemImage: state.systemImage)
+                                .foregroundColor(statusColor(for: state))
+                            Spacer()
+                            Text("\(viewModel.tasks.filter { $0.status.state == state }.count)")
+                                .foregroundColor(.secondary)
+                        }
+                    }
+                    .buttonStyle(.plain)
                 }
             }
         }
@@ -109,6 +114,15 @@ struct MainView: View {
             )
         case .history:
             HistoryView()
+        }
+    }
+
+    private func statusColor(for state: TaskState) -> Color {
+        switch state {
+        case .enabled: return .green
+        case .disabled: return .secondary
+        case .running: return .blue
+        case .error: return .red
         }
     }
 

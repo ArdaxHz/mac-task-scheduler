@@ -105,27 +105,55 @@ class LaunchdService: SchedulerService {
         let result: ShellResult
         switch task.action.type {
         case .executable:
-            result = try await shellExecutor.execute(
+            let directResult = try await shellExecutor.execute(
                 command: task.action.path,
                 arguments: task.action.arguments,
                 workingDirectory: task.action.workingDirectory,
                 environment: task.action.environmentVariables
             )
-        case .shellScript:
-            if let script = task.action.scriptContent, !script.isEmpty {
-                result = try await shellExecutor.executeScript(
-                    script,
-                    shell: "/bin/bash",
+            if directResult.exitCode == 126 {
+                // File not executable — retry through shell
+                let fullCommand = ([task.action.path] + task.action.arguments)
+                    .map { $0.contains(" ") ? "'\($0)'" : $0 }
+                    .joined(separator: " ")
+                result = try await shellExecutor.execute(
+                    command: "/bin/sh",
+                    arguments: ["-c", fullCommand],
                     workingDirectory: task.action.workingDirectory,
                     environment: task.action.environmentVariables
                 )
             } else {
-                result = try await shellExecutor.execute(
-                    command: "/bin/bash",
-                    arguments: [task.action.path],
+                result = directResult
+            }
+        case .shellScript:
+            let shellBinaries = ["bash", "sh", "zsh", "fish", "dash"]
+            let pathIsShellBinary = shellBinaries.contains(where: { task.action.path.hasSuffix("/\($0)") })
+
+            if let script = task.action.scriptContent, !script.isEmpty {
+                let shell = pathIsShellBinary ? task.action.path : "/bin/bash"
+                result = try await shellExecutor.executeScript(
+                    script,
+                    shell: shell,
                     workingDirectory: task.action.workingDirectory,
                     environment: task.action.environmentVariables
                 )
+            } else if pathIsShellBinary {
+                // Path is the shell itself (e.g. discovered plist) — run arguments through it
+                result = try await shellExecutor.execute(
+                    command: task.action.path,
+                    arguments: task.action.arguments,
+                    workingDirectory: task.action.workingDirectory,
+                    environment: task.action.environmentVariables
+                )
+            } else if !task.action.path.isEmpty {
+                result = try await shellExecutor.execute(
+                    command: "/bin/bash",
+                    arguments: [task.action.path] + task.action.arguments,
+                    workingDirectory: task.action.workingDirectory,
+                    environment: task.action.environmentVariables
+                )
+            } else {
+                result = ShellResult(exitCode: 1, standardOutput: "", standardError: "No script content or path provided")
             }
         case .appleScript:
             if let script = task.action.scriptContent, !script.isEmpty {

@@ -17,7 +17,15 @@ class TaskListViewModel: ObservableObject {
     @Published var showError = false
     @Published var searchText = ""
     @Published var filterBackend: SchedulerBackend?
-    @Published var filterState: TaskState?
+    @Published var filterStates: Set<TaskState> = []
+    @Published var filterTriggerType: TriggerType?
+    @Published var filterLastRun: LastRunFilter = .all
+
+    enum LastRunFilter: String, CaseIterable {
+        case all = "All"
+        case hasRun = "Has Run"
+        case neverRun = "Never Run"
+    }
 
     private let fileManager = FileManager.default
     private let historyService = TaskHistoryService.shared
@@ -42,11 +50,21 @@ class TaskListViewModel: ObservableObject {
             result = result.filter { $0.backend == backend }
         }
 
-        if let state = filterState {
-            result = result.filter { $0.status.state == state }
+        if !filterStates.isEmpty {
+            result = result.filter { filterStates.contains($0.status.state) }
         }
 
-        return result.sorted { $0.name < $1.name }
+        if let triggerType = filterTriggerType {
+            result = result.filter { $0.trigger.type == triggerType }
+        }
+
+        switch filterLastRun {
+        case .all: break
+        case .hasRun: result = result.filter { $0.status.lastRun != nil }
+        case .neverRun: result = result.filter { $0.status.lastRun == nil }
+        }
+
+        return result
     }
 
     var enabledTaskCount: Int {
@@ -256,6 +274,17 @@ class TaskListViewModel: ObservableObject {
             saveTasks()
         } catch {
             showError(message: "Failed to discover tasks: \(error.localizedDescription)")
+        }
+    }
+
+    func refreshAll() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        loadTasks()
+
+        for task in tasks {
+            await refreshTaskStatus(task)
         }
     }
 

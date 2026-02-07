@@ -96,6 +96,7 @@ struct TaskEditorView: View {
                 }
             }
             .pickerStyle(.segmented)
+            .help("launchd is the native macOS scheduler; cron is the traditional Unix scheduler")
         }
     }
 
@@ -106,6 +107,7 @@ struct TaskEditorView: View {
                     Label(type.rawValue, systemImage: type.systemImage).tag(type)
                 }
             }
+            .help("Executable: run a binary directly. Shell Script: run a bash/zsh script. AppleScript: run an AppleScript command")
 
             switch editorViewModel.actionType {
             case .executable:
@@ -207,6 +209,7 @@ struct TaskEditorView: View {
                     .tag(type)
                 }
             }
+            .help(editorViewModel.triggerType.description)
 
             switch editorViewModel.triggerType {
             case .calendar:
@@ -228,20 +231,55 @@ struct TaskEditorView: View {
     }
 
     private var intervalFields: some View {
-        HStack {
-            TextField("Interval", value: $editorViewModel.intervalValue, format: .number)
-                .frame(width: 80)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                Text("Every")
+                    .foregroundColor(.secondary)
 
-            Picker("Unit", selection: $editorViewModel.intervalUnit) {
-                ForEach(TaskEditorViewModel.IntervalUnit.allCases, id: \.self) { unit in
-                    Text(unit.rawValue).tag(unit)
+                TextField("Value", value: $editorViewModel.intervalValue, format: .number)
+                    .textFieldStyle(.roundedBorder)
+
+                Picker("Unit", selection: $editorViewModel.intervalUnit) {
+                    ForEach(TaskEditorViewModel.IntervalUnit.allCases, id: \.self) { unit in
+                        Text(unit.rawValue).tag(unit)
+                    }
                 }
+                .labelsHidden()
+                .frame(width: 110)
             }
-            .frame(width: 120)
+            .frame(maxWidth: .infinity)
 
-            Text("(\(editorViewModel.intervalValue * editorViewModel.intervalUnit.multiplier) seconds)")
+            let totalSeconds = editorViewModel.intervalValue * editorViewModel.intervalUnit.multiplier
+            Text("Runs every \(formattedInterval(totalSeconds))")
                 .font(.caption)
                 .foregroundColor(.secondary)
+        }
+    }
+
+    private func formattedInterval(_ totalSeconds: Int) -> String {
+        if totalSeconds < 60 {
+            return "\(totalSeconds) second\(totalSeconds == 1 ? "" : "s")"
+        } else if totalSeconds < 3600 {
+            let mins = totalSeconds / 60
+            let secs = totalSeconds % 60
+            if secs == 0 {
+                return "\(mins) minute\(mins == 1 ? "" : "s")"
+            }
+            return "\(mins) min \(secs) sec"
+        } else if totalSeconds < 86400 {
+            let hours = totalSeconds / 3600
+            let mins = (totalSeconds % 3600) / 60
+            if mins == 0 {
+                return "\(hours) hour\(hours == 1 ? "" : "s")"
+            }
+            return "\(hours) hr \(mins) min"
+        } else {
+            let days = totalSeconds / 86400
+            let hours = (totalSeconds % 86400) / 3600
+            if hours == 0 {
+                return "\(days) day\(days == 1 ? "" : "s")"
+            }
+            return "\(days) day\(days == 1 ? "" : "s") \(hours) hr"
         }
     }
 
@@ -263,6 +301,7 @@ struct TaskEditorView: View {
                     Image(systemName: "folder")
                 }
             }
+            .help("File path where the task's standard output will be written")
 
             HStack {
                 TextField("Standard Error Path (optional)", text: $editorViewModel.standardErrorPath)
@@ -273,6 +312,7 @@ struct TaskEditorView: View {
                     Image(systemName: "folder")
                 }
             }
+            .help("File path where the task's error output will be written")
         }
     }
 
