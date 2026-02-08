@@ -23,6 +23,7 @@ class PlistGenerator {
         plist += generateProgramSection(for: task)
         plist += generateTriggerSection(for: task)
         plist += generateOptionsSection(for: task)
+        plist += generateMetadataSection(for: task)
 
         plist += """
         </dict>
@@ -202,6 +203,28 @@ class PlistGenerator {
             section += """
                 <key>StandardErrorPath</key>
                 <string>\(escapeXML(errPath))</string>
+
+            """
+        }
+
+        return section
+    }
+
+    private func generateMetadataSection(for task: ScheduledTask) -> String {
+        var section = ""
+
+        if !task.name.isEmpty {
+            section += """
+                <key>MacSchedulerName</key>
+                <string>\(escapeXML(task.name))</string>
+
+            """
+        }
+
+        if !task.description.isEmpty {
+            section += """
+                <key>MacSchedulerDescription</key>
+                <string>\(escapeXML(task.description))</string>
 
             """
         }

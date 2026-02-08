@@ -45,6 +45,7 @@ struct HistoryView: View {
                 } label: {
                     Label("Clear History", systemImage: "trash")
                 }
+                .help("Delete all execution history")
                 .disabled(history.isEmpty)
             }
         }
@@ -89,6 +90,7 @@ struct HistoryView: View {
             }
             .labelsHidden()
             .frame(minWidth: 150, maxWidth: 250)
+            .help("Filter history by task")
 
             Spacer()
 
@@ -201,6 +203,7 @@ struct ExecutionDetailSheet: View {
                     Button("Done") {
                         dismiss()
                     }
+                    .help("Close execution details")
                 }
             }
         }

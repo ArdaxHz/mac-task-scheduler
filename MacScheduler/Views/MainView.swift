@@ -9,8 +9,7 @@ import SwiftUI
 
 struct MainView: View {
     @EnvironmentObject var viewModel: TaskListViewModel
-    @State private var showingEditor = false
-    @State private var editingTask: ScheduledTask?
+    @State private var activeSheet: EditorSheet?
     @State private var selectedNavItem: NavigationItem = .allTasks
 
     enum NavigationItem: Hashable {
@@ -18,33 +17,83 @@ struct MainView: View {
         case history
     }
 
+    enum EditorSheet: Identifiable {
+        case newTask
+        case editTask(ScheduledTask)
+
+        var id: String {
+            switch self {
+            case .newTask: return "new-task"
+            case .editTask(let task): return task.id.uuidString
+            }
+        }
+
+        var task: ScheduledTask? {
+            switch self {
+            case .newTask: return nil
+            case .editTask(let task): return task
+            }
+        }
+    }
+
+    @AppStorage("autoCheckUpdates") private var autoCheckUpdates = true
+    @State private var showInspector = true
+    @State private var showUpdateAlert = false
+    @State private var availableUpdate: UpdateService.Release?
+
     var body: some View {
         NavigationSplitView {
             sidebar
-        } content: {
-            contentView
         } detail: {
-            detailView
+            contentView
         }
         .toolbar(removing: .sidebarToggle)
-        .sheet(isPresented: $showingEditor) {
-            TaskEditorView(task: editingTask) { task in
-                if editingTask != nil {
+        .inspector(isPresented: $showInspector) {
+            detailView
+                .inspectorColumnWidth(min: 200, ideal: 350, max: 500)
+        }
+        .onChange(of: viewModel.selectedTask) { _, newTask in
+            if newTask != nil && !showInspector {
+                showInspector = true
+            }
+        }
+        .sheet(item: $activeSheet) { sheet in
+            TaskEditorView(task: sheet.task) { task in
+                if sheet.task != nil {
                     Task { await viewModel.updateTask(task) }
                 } else {
                     Task { await viewModel.addTask(task) }
                 }
             }
-            .id(editingTask?.id ?? UUID())
         }
         .onReceive(NotificationCenter.default.publisher(for: .createNewTask)) { _ in
-            editingTask = nil
-            showingEditor = true
+            activeSheet = .newTask
         }
         .alert("Error", isPresented: $viewModel.showError) {
             Button("OK", role: .cancel) {}
         } message: {
             Text(viewModel.errorMessage ?? "An unknown error occurred")
+        }
+        .alert("Update Available", isPresented: $showUpdateAlert) {
+            if let update = availableUpdate {
+                Button("Download") {
+                    if let url = URL(string: update.htmlURL) {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+                Button("Later", role: .cancel) {}
+            }
+        } message: {
+            if let update = availableUpdate {
+                Text("Version \(update.version) is available. You are currently on v\(Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?").")
+            }
+        }
+        .task {
+            guard autoCheckUpdates else { return }
+            if let release = await UpdateService.shared.checkForUpdate() {
+                availableUpdate = release
+                showUpdateAlert = true
+            }
         }
     }
 
@@ -86,17 +135,7 @@ struct MainView: View {
             }
         }
         .listStyle(.sidebar)
-        .navigationSplitViewColumnWidth(min: 180, ideal: 200, max: 250)
-        .toolbar {
-            ToolbarItem {
-                Button {
-                    editingTask = nil
-                    showingEditor = true
-                } label: {
-                    Label("Add Task", systemImage: "plus")
-                }
-            }
-        }
+        .navigationSplitViewColumnWidth(min: 140, ideal: 190, max: 250)
     }
 
     @ViewBuilder
@@ -104,9 +143,11 @@ struct MainView: View {
         switch selectedNavItem {
         case .allTasks:
             TaskListView(
+                onAdd: {
+                    activeSheet = .newTask
+                },
                 onEdit: { task in
-                    editingTask = task
-                    showingEditor = true
+                    activeSheet = .editTask(task)
                 },
                 onSelect: { task in
                     viewModel.selectedTask = task
@@ -130,8 +171,7 @@ struct MainView: View {
     private var detailView: some View {
         if let task = viewModel.selectedTask {
             TaskDetailView(task: task) { task in
-                editingTask = task
-                showingEditor = true
+                activeSheet = .editTask(task)
             }
         } else {
             ContentUnavailableView {

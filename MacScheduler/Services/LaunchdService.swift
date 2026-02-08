@@ -15,9 +15,19 @@ class LaunchdService: SchedulerService {
     private let shellExecutor = ShellExecutor.shared
     private let plistGenerator = PlistGenerator()
 
-    private var launchAgentsDirectory: URL {
+    private var userLaunchAgentsDirectory: URL {
         let home = fileManager.homeDirectoryForCurrentUser
         return home.appendingPathComponent("Library/LaunchAgents")
+    }
+
+    /// All directories to scan for launchd plists.
+    private var allLaunchDirectories: [(url: URL, isUserWritable: Bool)] {
+        let home = fileManager.homeDirectoryForCurrentUser
+        return [
+            (home.appendingPathComponent("Library/LaunchAgents"), true),
+            (URL(fileURLWithPath: "/Library/LaunchAgents"), false),
+            (URL(fileURLWithPath: "/Library/LaunchDaemons"), false),
+        ]
     }
 
     private init() {
@@ -25,22 +35,26 @@ class LaunchdService: SchedulerService {
     }
 
     private func ensureLaunchAgentsDirectoryExists() {
-        try? fileManager.createDirectory(at: launchAgentsDirectory,
+        try? fileManager.createDirectory(at: userLaunchAgentsDirectory,
                                          withIntermediateDirectories: true)
     }
 
-    private func plistURL(for task: ScheduledTask) -> URL {
-        launchAgentsDirectory.appendingPathComponent(task.plistFileName)
+    /// Default path for new tasks (in user LaunchAgents).
+    private func defaultPlistURL(for task: ScheduledTask) -> URL {
+        userLaunchAgentsDirectory.appendingPathComponent(task.plistFileName)
+    }
+
+    /// Resolve the actual plist path: use stored path if available, otherwise construct from label.
+    private func resolvedPlistPath(for task: ScheduledTask) -> String {
+        if let path = task.plistFilePath, fileManager.fileExists(atPath: path) {
+            return path
+        }
+        return defaultPlistURL(for: task).path
     }
 
     func install(task: ScheduledTask) async throws {
-        let errors = task.validate()
-        if !errors.isEmpty {
-            throw SchedulerError.invalidTask(errors.joined(separator: "; "))
-        }
-
         let plistContent = plistGenerator.generate(for: task)
-        let plistURL = plistURL(for: task)
+        let plistURL = defaultPlistURL(for: task)
 
         do {
             try plistContent.write(to: plistURL, atomically: true, encoding: .utf8)
@@ -50,14 +64,15 @@ class LaunchdService: SchedulerService {
     }
 
     func uninstall(task: ScheduledTask) async throws {
-        if await isInstalled(task: task) {
+        let isLoaded = await isLoaded(label: task.launchdLabel)
+        if isLoaded {
             try await disable(task: task)
         }
 
-        let plistURL = plistURL(for: task)
-        if fileManager.fileExists(atPath: plistURL.path) {
+        let path = resolvedPlistPath(for: task)
+        if fileManager.fileExists(atPath: path) {
             do {
-                try fileManager.removeItem(at: plistURL)
+                try fileManager.removeItem(atPath: path)
             } catch {
                 throw SchedulerError.fileSystemError(error.localizedDescription)
             }
@@ -65,16 +80,24 @@ class LaunchdService: SchedulerService {
     }
 
     func enable(task: ScheduledTask) async throws {
-        let plistURL = plistURL(for: task)
+        let path = resolvedPlistPath(for: task)
 
-        guard fileManager.fileExists(atPath: plistURL.path) else {
+        guard fileManager.fileExists(atPath: path) else {
             try await install(task: task)
-            return try await enable(task: task)
+            let newPath = defaultPlistURL(for: task).path
+            let result = try await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: ["load", newPath]
+            )
+            if result.exitCode != 0 && !result.standardError.contains("already loaded") {
+                throw SchedulerError.plistLoadFailed(result.standardError)
+            }
+            return
         }
 
         let result = try await shellExecutor.execute(
             command: "/bin/launchctl",
-            arguments: ["load", plistURL.path]
+            arguments: ["load", path]
         )
 
         if result.exitCode != 0 && !result.standardError.contains("already loaded") {
@@ -83,19 +106,62 @@ class LaunchdService: SchedulerService {
     }
 
     func disable(task: ScheduledTask) async throws {
-        let plistURL = plistURL(for: task)
+        let path = resolvedPlistPath(for: task)
 
-        guard fileManager.fileExists(atPath: plistURL.path) else {
+        guard fileManager.fileExists(atPath: path) else {
             return
         }
 
         let result = try await shellExecutor.execute(
             command: "/bin/launchctl",
-            arguments: ["unload", plistURL.path]
+            arguments: ["unload", path]
         )
 
         if result.exitCode != 0 && !result.standardError.contains("Could not find") {
             throw SchedulerError.plistUnloadFailed(result.standardError)
+        }
+    }
+
+    /// Robust update: unload old label, delete old plist, write new plist, load new.
+    func updateTask(oldTask: ScheduledTask, newTask: ScheduledTask) async throws {
+        // 1. Always try to unload old task (don't check isLoaded — avoids stale state)
+        let oldPath = resolvedPlistPath(for: oldTask)
+        if fileManager.fileExists(atPath: oldPath) {
+            let _ = try? await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: ["unload", oldPath]
+            )
+        }
+
+        // 2. Delete old plist file (handles label/filename change)
+        if fileManager.fileExists(atPath: oldPath) {
+            try? fileManager.removeItem(atPath: oldPath)
+        }
+
+        // 3. Write new plist file (always to user LaunchAgents)
+        let plistContent = plistGenerator.generate(for: newTask)
+        let newPlistURL = defaultPlistURL(for: newTask)
+        do {
+            try plistContent.write(to: newPlistURL, atomically: true, encoding: .utf8)
+        } catch {
+            throw SchedulerError.plistCreationFailed(error.localizedDescription)
+        }
+
+        // 4. Always load new plist to register with launchd
+        let loadResult = try await shellExecutor.execute(
+            command: "/bin/launchctl",
+            arguments: ["load", newPlistURL.path]
+        )
+        if loadResult.exitCode != 0 && !loadResult.standardError.contains("already loaded") {
+            throw SchedulerError.plistLoadFailed(loadResult.standardError)
+        }
+
+        // 5. If task should be disabled, unload after registering
+        if !newTask.isEnabled {
+            let _ = try? await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: ["unload", newPlistURL.path]
+            )
         }
     }
 
@@ -112,7 +178,6 @@ class LaunchdService: SchedulerService {
                 environment: task.action.environmentVariables
             )
             if directResult.exitCode == 126 {
-                // File not executable — retry through shell
                 let fullCommand = ([task.action.path] + task.action.arguments)
                     .map { $0.contains(" ") ? "'\($0)'" : $0 }
                     .joined(separator: " ")
@@ -138,7 +203,6 @@ class LaunchdService: SchedulerService {
                     environment: task.action.environmentVariables
                 )
             } else if pathIsShellBinary {
-                // Path is the shell itself (e.g. discovered plist) — run arguments through it
                 result = try await shellExecutor.execute(
                     command: task.action.path,
                     arguments: task.action.arguments,
@@ -182,15 +246,20 @@ class LaunchdService: SchedulerService {
     }
 
     func isInstalled(task: ScheduledTask) async -> Bool {
-        let plistURL = plistURL(for: task)
-        return fileManager.fileExists(atPath: plistURL.path)
+        let path = resolvedPlistPath(for: task)
+        return fileManager.fileExists(atPath: path)
     }
 
     func isRunning(task: ScheduledTask) async -> Bool {
+        await isLoaded(label: task.launchdLabel)
+    }
+
+    /// Check if a launchd label is currently loaded.
+    func isLoaded(label: String) async -> Bool {
         do {
             let result = try await shellExecutor.execute(
                 command: "/bin/launchctl",
-                arguments: ["list", task.launchdLabel]
+                arguments: ["list", label]
             )
             return result.exitCode == 0
         } catch {
@@ -198,26 +267,98 @@ class LaunchdService: SchedulerService {
         }
     }
 
+    /// Read last run time from native launchd sources (stdout/stderr file mtime).
+    func getLastRunTime(for task: ScheduledTask) -> Date? {
+        if let outPath = task.standardOutPath, !outPath.isEmpty,
+           let attrs = try? fileManager.attributesOfItem(atPath: outPath),
+           let mtime = attrs[.modificationDate] as? Date {
+            return mtime
+        }
+        if let errPath = task.standardErrorPath, !errPath.isEmpty,
+           let attrs = try? fileManager.attributesOfItem(atPath: errPath),
+           let mtime = attrs[.modificationDate] as? Date {
+            return mtime
+        }
+        return nil
+    }
+
+    /// Read run count and last exit code from launchctl print.
+    func getLaunchdInfo(for task: ScheduledTask) async -> (runs: Int, lastExitCode: Int32)? {
+        let uid = getuid()
+        do {
+            let result = try await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: ["print", "gui/\(uid)/\(task.launchdLabel)"],
+                timeout: 5.0
+            )
+            guard result.exitCode == 0 else { return nil }
+
+            var runs = 0
+            var lastExit: Int32 = 0
+
+            for line in result.standardOutput.components(separatedBy: "\n") {
+                let trimmed = line.trimmingCharacters(in: .whitespaces)
+                if trimmed.hasPrefix("runs = ") {
+                    runs = Int(trimmed.dropFirst("runs = ".count)) ?? 0
+                } else if trimmed.hasPrefix("last exit reason = ") {
+                    if let bracketRange = trimmed.range(of: #"\[(\d+)\]"#, options: .regularExpression) {
+                        let codeStr = trimmed[bracketRange].dropFirst().dropLast()
+                        lastExit = Int32(codeStr) ?? 0
+                    }
+                }
+            }
+            return (runs, lastExit)
+        } catch {
+            return nil
+        }
+    }
+
+    /// Get all loaded launchd labels in a single call (much faster than per-task isLoaded).
+    func getAllLoadedLabels() async -> Set<String> {
+        do {
+            let result = try await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: ["list"],
+                timeout: 10.0
+            )
+            guard result.exitCode == 0 else { return [] }
+            var labels = Set<String>()
+            for line in result.standardOutput.components(separatedBy: "\n") {
+                let parts = line.components(separatedBy: "\t")
+                if parts.count >= 3 {
+                    labels.insert(parts[2])
+                }
+            }
+            return labels
+        } catch {
+            return []
+        }
+    }
+
+    /// Discover tasks from all launchd directories.
     func discoverTasks() async throws -> [ScheduledTask] {
+        let loadedLabels = await getAllLoadedLabels()
         var tasks: [ScheduledTask] = []
 
-        guard let contents = try? fileManager.contentsOfDirectory(at: launchAgentsDirectory,
-                                                                   includingPropertiesForKeys: nil) else {
-            return tasks
-        }
+        for dir in allLaunchDirectories {
+            guard let contents = try? fileManager.contentsOfDirectory(at: dir.url,
+                                                                       includingPropertiesForKeys: nil) else {
+                continue
+            }
 
-        for url in contents where url.pathExtension == "plist" {
-            if var task = parsePlist(at: url) {
-                let isLoaded = await isRunning(task: task)
-                task.status.state = isLoaded ? .enabled : .disabled
-                tasks.append(task)
+            for url in contents where url.pathExtension == "plist" {
+                if var task = parsePlist(at: url, isUserWritable: dir.isUserWritable) {
+                    task.status.state = loadedLabels.contains(task.launchdLabel) ? .enabled : .disabled
+                    task.plistFilePath = url.path
+                    tasks.append(task)
+                }
             }
         }
 
         return tasks
     }
 
-    private func parsePlist(at url: URL) -> ScheduledTask? {
+    private func parsePlist(at url: URL, isUserWritable: Bool = true) -> ScheduledTask? {
         guard let data = try? Data(contentsOf: url),
               let plist = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any] else {
             return nil
@@ -227,28 +368,23 @@ class LaunchdService: SchedulerService {
             return nil
         }
 
-        let isExternal: Bool
-        let uuid: UUID
-        let taskName: String
+        let uuid = ScheduledTask.uuidFromLabel(label)
 
-        if label.hasPrefix("com.macscheduler.task.") {
-            isExternal = false
-            let uuidString = String(label.dropFirst("com.macscheduler.task.".count))
-            guard let parsedUUID = UUID(uuidString: uuidString.uppercased()) else {
-                return nil
-            }
-            uuid = parsedUUID
-            taskName = ""
+        var task = ScheduledTask(id: uuid)
+        task.backend = .launchd
+        task.launchdLabel = label
+        task.isReadOnly = !isUserWritable
+
+        // Read custom metadata if present, otherwise derive name from label
+        if let customName = plist["MacSchedulerName"] as? String {
+            task.name = customName
         } else {
-            isExternal = true
-            uuid = ScheduledTask.uuidFromLabel(label)
-            taskName = formatLabelAsName(label)
+            task.name = formatLabelAsName(label)
         }
 
-        var task = ScheduledTask(id: uuid, isExternal: isExternal)
-        task.name = taskName
-        task.backend = .launchd
-        task.externalLabel = isExternal ? label : nil
+        if let customDesc = plist["MacSchedulerDescription"] as? String {
+            task.description = customDesc
+        }
 
         if let program = plist["Program"] as? String {
             task.action.path = program

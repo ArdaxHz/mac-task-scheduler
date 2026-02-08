@@ -87,6 +87,7 @@ struct ScriptEditorView: View {
                             dismiss()
                         }
                     }
+                    .help("Discard changes and close")
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
@@ -94,6 +95,7 @@ struct ScriptEditorView: View {
                         saveScript()
                     }
                     .disabled(!hasChanges)
+                    .help("Save script to disk")
                 }
 
                 ToolbarItemGroup {
@@ -103,12 +105,14 @@ struct ScriptEditorView: View {
                         Label("Revert", systemImage: "arrow.uturn.backward")
                     }
                     .disabled(!hasChanges)
+                    .help("Revert to last saved version")
 
                     Button {
                         openInExternalEditor()
                     } label: {
                         Label("Open in Editor", systemImage: "square.and.pencil")
                     }
+                    .help("Open script in default text editor")
                 }
             }
             .confirmationDialog("Unsaved Changes", isPresented: $showSaveConfirmation) {

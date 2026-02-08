@@ -37,16 +37,24 @@ There are no tests. The project has zero external dependencies — pure Swift/Sw
 
 MVVM with a protocol-based service layer for scheduler backends.
 
-**Data flow:** `MacSchedulerApp` creates `TaskListViewModel` as a `@StateObject` and injects it via `.environmentObject()`. Views read from the view model; mutations go through async view model methods that delegate to the service layer.
+**Stateless design:** The app has NO internal database. All task data is read directly from live LaunchAgents/LaunchDaemons plist files and crontab. Tasks created by the app are standard native launchd/cron tasks — if the app is deleted, all tasks continue to run.
+
+**Data flow:** `MacSchedulerApp` creates `TaskListViewModel` as a `@StateObject` and injects it via `.environmentObject()`. On init and refresh, the view model calls `discoverAllTasks()` which reads from:
+- `~/Library/LaunchAgents/` (user agents, read-write)
+- `/Library/LaunchAgents/` (system agents, read-only)
+- `/Library/LaunchDaemons/` (system daemons, read-only)
+- User crontab
+
+**Custom metadata:** Task names and descriptions are stored as `MacSchedulerName` and `MacSchedulerDescription` keys inside plist files (launchd ignores unknown keys). For tasks without these keys, names are derived from the launchd label.
 
 **Service layer** uses the Strategy pattern:
 - `SchedulerService` protocol defines the backend interface (install/uninstall/enable/disable/runNow/discover)
 - `LaunchdService` — writes plist files to `~/Library/LaunchAgents/`, manages via `launchctl`
-- `CronService` — edits user crontab, tags entries with `# MacScheduler:<UUID>` comments
+- `CronService` — edits user crontab, tags entries with `# CronTask:<label>` comments
 - `SchedulerServiceFactory` selects the appropriate service by `SchedulerBackend` enum
 - `TaskHistoryService` — actor for thread-safe execution history persistence
 
-**Persistence:** JSON files in `~/Library/Application Support/MacScheduler/` (tasks.json, history.json). Uses `JSONEncoder`/`JSONDecoder` with `.iso8601` date strategy.
+**Task identity:** Each task uses its launchd label as its primary identity. The `id: UUID` is deterministically derived from the label via `ScheduledTask.uuidFromLabel()`. New tasks get a `com.user.<sanitized-name>` label by default.
 
 **Process execution:** `ShellExecutor` actor wraps Foundation `Process`. Handles executables, shell scripts, and AppleScript. Auto-chmod 755 for non-executable files. Supports timeouts (default 60s).
 
@@ -57,11 +65,13 @@ MVVM with a protocol-based service layer for scheduler backends.
 - **Discovered plist tasks** store the shell binary (e.g. `/bin/bash`) as the `ProgramArguments[0]` path, with the actual script as subsequent arguments. `LaunchdService.runNow` detects this to avoid double-wrapping (`/bin/bash /bin/bash ...`).
 - **Table sorting**: `TaskListViewModel.filteredTasks` must not apply its own sort — the SwiftUI `Table` manages sort order via `sortOrder` binding. Adding a hardcoded `.sorted()` will silently override table column sorting.
 - **App sandbox is disabled** (entitlements) because the app needs direct access to `~/Library/LaunchAgents/`, crontab, and arbitrary script execution.
+- **Read-only tasks**: Tasks from `/Library/LaunchAgents/` and `/Library/LaunchDaemons/` are marked `isReadOnly` — edit/delete buttons are disabled.
+- **Update flow for launchd**: `LaunchdService.updateTask(oldTask:newTask:)` does: unload old → delete old plist → write new plist → load new. This handles label/filename changes.
 - The Xcode scheme is shared (checked into `xcshareddata/xcschemes/`) for CI builds.
 
 ## CI/CD
 
-GitHub Actions (`.github/workflows/release.yml`) runs on every push to `main`: builds a Release archive, creates DMG + ZIP, and publishes a GitHub Release with a date-based version tag (`v{YYYY.MM.DD}-{SHORT_SHA}`).
+GitHub Actions (`.github/workflows/release.yml`) runs on every push to `main`: builds a Release archive, creates a ZIP of the .app, and publishes a GitHub Release with a version tag (`v{MARKETING_VERSION}-{SHORT_SHA}`).
 
 ## Versioning
 

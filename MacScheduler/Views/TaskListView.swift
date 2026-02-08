@@ -9,6 +9,7 @@ import SwiftUI
 
 struct TaskListView: View {
     @EnvironmentObject var viewModel: TaskListViewModel
+    var onAdd: () -> Void
     var onEdit: (ScheduledTask) -> Void
     var onSelect: (ScheduledTask) -> Void
 
@@ -18,6 +19,8 @@ struct TaskListView: View {
     var body: some View {
         VStack(spacing: 0) {
             filterBar
+
+            Divider()
 
             if viewModel.filteredTasks.isEmpty {
                 emptyState
@@ -29,14 +32,36 @@ struct TaskListView: View {
         .toolbar {
             ToolbarItemGroup {
                 Button {
+                    onAdd()
+                } label: {
+                    Label("Add Task", systemImage: "plus")
+                }
+                .help("Create a new scheduled task")
+
+                Button {
                     Task {
-                        await viewModel.discoverExistingTasks()
                         await viewModel.refreshAll()
                     }
                 } label: {
                     Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
                 }
-                .help("Refresh tasks, statuses, and discover new launchd/cron tasks")
+                .help("Refresh all tasks from live LaunchAgents and cron")
+                .disabled(viewModel.isLoading)
+
+                Button {
+                    Task { await viewModel.loadAllDaemons() }
+                } label: {
+                    Label("Load All", systemImage: "arrow.up.circle")
+                }
+                .help("Load all launchd tasks into the daemon")
+                .disabled(viewModel.isLoading)
+
+                Button {
+                    Task { await viewModel.unloadAllDaemons() }
+                } label: {
+                    Label("Unload All", systemImage: "arrow.down.circle")
+                }
+                .help("Unload all launchd tasks from the daemon")
                 .disabled(viewModel.isLoading)
             }
         }
@@ -66,6 +91,7 @@ struct TaskListView: View {
                                 .foregroundColor(.secondary)
                         }
                         .buttonStyle(.plain)
+                        .help("Clear search")
                     }
                 }
                 .padding(8)
@@ -135,6 +161,7 @@ struct TaskListView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .help("Filter by trigger type")
 
                 // Backend filter
                 Menu {
@@ -180,6 +207,7 @@ struct TaskListView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .help("Filter by scheduler backend")
 
                 // Last Run filter
                 Menu {
@@ -214,6 +242,7 @@ struct TaskListView: View {
                 }
                 .menuStyle(.borderlessButton)
                 .fixedSize()
+                .help("Filter by last run status")
 
                 Spacer()
 
@@ -250,33 +279,17 @@ struct TaskListView: View {
 
             TableColumn("Name", value: \.name) { task in
                 VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Text(task.name)
-                            .fontWeight(.medium)
-                        if task.isExternal {
-                            Text("External")
-                                .font(.caption2)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 1)
-                                .background(Color.purple.opacity(0.2))
-                                .foregroundColor(.purple)
-                                .cornerRadius(3)
-                        }
-                    }
+                    Text(task.name)
+                        .fontWeight(.medium)
                     if !task.description.isEmpty {
                         Text(task.description)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                    } else if task.isExternal, let label = task.externalLabel {
-                        Text(label)
                             .font(.caption)
                             .foregroundColor(.secondary)
                             .lineLimit(1)
                     }
                 }
             }
-            .width(min: 150, ideal: 200)
+            .width(min: 100, ideal: 200)
 
             TableColumn("Trigger", value: \.triggerTypeName) { task in
                 HStack(spacing: 6) {
@@ -289,7 +302,7 @@ struct TaskListView: View {
                 }
                 .help(task.trigger.displayString)
             }
-            .width(min: 140, ideal: 200, max: 280)
+            .width(min: 80, ideal: 180, max: 280)
 
             TableColumn("Backend", value: \.backendName) { task in
                 Text(task.backend.rawValue)
@@ -299,7 +312,7 @@ struct TaskListView: View {
                     .background(task.backend == .launchd ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
                     .cornerRadius(4)
             }
-            .width(70)
+            .width(min: 50, ideal: 70)
 
             TableColumn("Last Run", value: \.lastRunDate) { task in
                 if let lastRun = task.status.lastRun {
@@ -312,7 +325,7 @@ struct TaskListView: View {
                         .foregroundColor(.secondary)
                 }
             }
-            .width(min: 120, ideal: 150)
+            .width(min: 80, ideal: 150)
         }
         .contextMenu(forSelectionType: ScheduledTask.ID.self) { ids in
             if let id = ids.first, let task = viewModel.tasks.first(where: { $0.id == id }) {
@@ -331,6 +344,19 @@ struct TaskListView: View {
                 viewModel.selectedTask = viewModel.tasks.first { $0.id == id }
             } else {
                 viewModel.selectedTask = nil
+            }
+        }
+        .onChange(of: viewModel.selectedTask) { _, newTask in
+            // Sync back: when ViewModel updates selectedTask (e.g. after refresh), update table selection
+            if selectedTaskId != newTask?.id {
+                selectedTaskId = newTask?.id
+            }
+        }
+        .onChange(of: viewModel.tasks) { _, _ in
+            // When task list refreshes, sync selection to keep it in sync
+            if let currentId = selectedTaskId,
+               !viewModel.tasks.contains(where: { $0.id == currentId }) {
+                selectedTaskId = nil
             }
         }
     }
@@ -433,6 +459,6 @@ struct StatusFilterChip: View {
 }
 
 #Preview {
-    TaskListView(onEdit: { _ in }, onSelect: { _ in })
+    TaskListView(onAdd: {}, onEdit: { _ in }, onSelect: { _ in })
         .environmentObject(TaskListViewModel())
 }

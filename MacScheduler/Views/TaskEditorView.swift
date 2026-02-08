@@ -44,6 +44,7 @@ struct TaskEditorView: View {
                     Button("Cancel") {
                         dismiss()
                     }
+                    .help("Discard changes and close")
                 }
 
                 ToolbarItem(placement: .confirmationAction) {
@@ -51,6 +52,7 @@ struct TaskEditorView: View {
                         save()
                     }
                     .disabled(editorViewModel.name.isEmpty)
+                    .help("Save task and reload launchd daemon")
                 }
             }
             .alert("Validation Errors", isPresented: $editorViewModel.showValidationErrors) {
@@ -59,13 +61,6 @@ struct TaskEditorView: View {
                 Text(editorViewModel.validationErrors.joined(separator: "\n"))
             }
             .onAppear {
-                if let task = task {
-                    editorViewModel.loadTask(task)
-                } else {
-                    editorViewModel.reset()
-                }
-            }
-            .onChange(of: task?.id) { _, newId in
                 if let task = task {
                     editorViewModel.loadTask(task)
                 } else {
@@ -86,9 +81,17 @@ struct TaskEditorView: View {
     private var basicInfoSection: some View {
         Section("Basic Information") {
             TextField("Task Name", text: $editorViewModel.name)
+                .onChange(of: editorViewModel.name) { _, _ in
+                    editorViewModel.updateLabelFromName()
+                }
 
             TextField("Description", text: $editorViewModel.taskDescription, axis: .vertical)
                 .lineLimit(2...4)
+
+            TextField("Label (e.g. com.user.my-task)", text: $editorViewModel.taskLabel)
+                .font(.system(.body, design: .monospaced))
+                .help("The native launchd label / plist filename. This is how macOS identifies the task.")
+                .disabled(editorViewModel.isEditing && (task?.isReadOnly ?? false))
 
             Picker("Backend", selection: $editorViewModel.backend) {
                 ForEach(SchedulerBackend.allCases, id: \.self) { backend in
@@ -126,7 +129,10 @@ struct TaskEditorView: View {
                 } label: {
                     Image(systemName: "folder")
                 }
+                .help("Browse for working directory")
             }
+
+            tccWarning(for: $editorViewModel.workingDirectory, isDirectory: true)
         }
     }
 
@@ -140,7 +146,10 @@ struct TaskEditorView: View {
                 } label: {
                     Image(systemName: "folder")
                 }
+                .help("Browse for executable")
             }
+
+            tccWarning(for: $editorViewModel.executablePath)
 
             TextField("Arguments (space-separated)", text: $editorViewModel.arguments)
         }
@@ -156,7 +165,10 @@ struct TaskEditorView: View {
                 } label: {
                     Image(systemName: "folder")
                 }
+                .help("Browse for script file")
             }
+
+            tccWarning(for: $editorViewModel.executablePath)
 
             VStack(alignment: .leading) {
                 Text("Script Content")
@@ -180,7 +192,10 @@ struct TaskEditorView: View {
                 } label: {
                     Image(systemName: "folder")
                 }
+                .help("Browse for AppleScript file")
             }
+
+            tccWarning(for: $editorViewModel.executablePath)
 
             VStack(alignment: .leading) {
                 Text("AppleScript Content")
@@ -236,7 +251,7 @@ struct TaskEditorView: View {
                 Text("Every")
                     .foregroundColor(.secondary)
 
-                TextField("Value", value: $editorViewModel.intervalValue, format: .number)
+                TextField("", value: $editorViewModel.intervalValue, format: .number)
                     .textFieldStyle(.roundedBorder)
 
                 Picker("Unit", selection: $editorViewModel.intervalUnit) {
@@ -294,25 +309,77 @@ struct TaskEditorView: View {
 
             HStack {
                 TextField("Standard Output Path (optional)", text: $editorViewModel.standardOutPath)
+                    .help("File path where the task's standard output will be written")
                 Button {
                     filePickerField = .standardOut
                     showFilePicker = true
                 } label: {
                     Image(systemName: "folder")
                 }
+                .help("Browse for stdout log file location")
             }
-            .help("File path where the task's standard output will be written")
+
+            tccWarning(for: $editorViewModel.standardOutPath)
 
             HStack {
                 TextField("Standard Error Path (optional)", text: $editorViewModel.standardErrorPath)
+                    .help("File path where the task's error output will be written")
                 Button {
                     filePickerField = .standardError
                     showFilePicker = true
                 } label: {
                     Image(systemName: "folder")
                 }
+                .help("Browse for stderr log file location")
             }
-            .help("File path where the task's error output will be written")
+
+            tccWarning(for: $editorViewModel.standardErrorPath)
+        }
+    }
+
+    @ViewBuilder
+    private func tccWarning(for path: Binding<String>, isDirectory: Bool = false) -> some View {
+        if !path.wrappedValue.isEmpty && TaskEditorViewModel.isTCCProtected(path.wrappedValue) {
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundColor(.orange)
+                    Text("This path is in a TCC-protected folder (Documents, Desktop, or Downloads). launchd cannot access files there.")
+                        .font(.caption)
+                        .foregroundColor(.orange)
+                }
+
+                HStack(spacing: 8) {
+                    if !isDirectory && FileManager.default.fileExists(atPath: path.wrappedValue) {
+                        Button {
+                            if let newPath = editorViewModel.copyFileToScriptsDirectory(from: path.wrappedValue) {
+                                path.wrappedValue = newPath
+                            }
+                        } label: {
+                            Label("Copy to ~/Library/Scripts/", systemImage: "doc.on.doc")
+                                .font(.caption)
+                        }
+                        .help("Copy this file to the scripts directory where launchd can access it")
+                    }
+
+                    Button {
+                        let revealPath = path.wrappedValue
+                        if FileManager.default.fileExists(atPath: revealPath) {
+                            NSWorkspace.shared.selectFile(revealPath, inFileViewerRootedAtPath: "")
+                        } else {
+                            let parent = (revealPath as NSString).deletingLastPathComponent
+                            NSWorkspace.shared.open(URL(fileURLWithPath: parent))
+                        }
+                    } label: {
+                        Label("Reveal in Finder", systemImage: "folder")
+                            .font(.caption)
+                    }
+                    .help("Show this file in Finder")
+                }
+            }
+            .padding(8)
+            .background(Color.orange.opacity(0.1))
+            .cornerRadius(6)
         }
     }
 

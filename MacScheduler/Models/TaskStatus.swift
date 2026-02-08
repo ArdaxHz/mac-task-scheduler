@@ -23,7 +23,7 @@ enum TaskState: String, Codable, CaseIterable {
     }
 }
 
-struct TaskExecutionResult: Codable, Identifiable {
+struct TaskExecutionResult: Codable, Identifiable, Equatable {
     let id: UUID
     let taskId: UUID
     let startTime: Date
@@ -52,7 +52,7 @@ struct TaskExecutionResult: Codable, Identifiable {
     }
 }
 
-struct TaskStatus: Codable {
+struct TaskStatus: Codable, Equatable {
     var state: TaskState
     var lastRun: Date?
     var lastResult: TaskExecutionResult?

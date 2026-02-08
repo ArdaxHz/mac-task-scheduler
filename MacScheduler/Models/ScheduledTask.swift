@@ -3,6 +3,7 @@
 //  MacScheduler
 //
 //  The core model representing a scheduled task.
+//  All tasks are native launchd/cron tasks — no app-specific prefixes.
 //
 
 import Foundation
@@ -40,8 +41,11 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     var keepAlive: Bool
     var standardOutPath: String?
     var standardErrorPath: String?
-    var externalLabel: String?
-    var isExternal: Bool
+    /// The native launchd label for this task (e.g. com.apple.example or com.user.mytask).
+    var launchdLabel: String
+    var isReadOnly: Bool
+    /// Full path to the plist file on disk (set during discovery, nil for new tasks).
+    var plistFilePath: String?
 
     init(id: UUID = UUID(),
          name: String = "",
@@ -56,8 +60,9 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
          keepAlive: Bool = false,
          standardOutPath: String? = nil,
          standardErrorPath: String? = nil,
-         externalLabel: String? = nil,
-         isExternal: Bool = false) {
+         launchdLabel: String = "",
+         isReadOnly: Bool = false,
+         plistFilePath: String? = nil) {
         self.id = id
         self.name = name
         self.description = description
@@ -71,35 +76,27 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
         self.keepAlive = keepAlive
         self.standardOutPath = standardOutPath
         self.standardErrorPath = standardErrorPath
-        self.externalLabel = externalLabel
-        self.isExternal = isExternal
-    }
-
-    var launchdLabel: String {
-        if let external = externalLabel {
-            return external
-        }
-        return "com.macscheduler.task.\(id.uuidString.lowercased())"
+        self.launchdLabel = launchdLabel
+        self.isReadOnly = isReadOnly
+        self.plistFilePath = plistFilePath
     }
 
     var plistFileName: String {
         "\(launchdLabel).plist"
     }
 
+    /// Generate a deterministic UUID from a launchd label string.
     static func uuidFromLabel(_ label: String) -> UUID {
-        // Use a deterministic hash (djb2 variant) to generate consistent UUIDs
         let data = Data(label.utf8)
         var uuidBytes = [UInt8](repeating: 0, count: 16)
 
-        // Generate 16 bytes using multiple hash rounds
         for round in 0..<16 {
-            var hash: UInt64 = 5381
+            // Vary the seed per round so each byte is independently computed
+            var hash: UInt64 = 5381 &+ UInt64(round) &* 2654435761
             for byte in data {
                 hash = ((hash << 5) &+ hash) &+ UInt64(byte)
             }
-            // Mix in the round number to get different bytes
-            hash = hash &+ UInt64(round) &* 31
-            uuidBytes[round] = UInt8(truncatingIfNeeded: hash)
+            uuidBytes[round] = UInt8(truncatingIfNeeded: hash >> 8)
         }
 
         return UUID(uuid: (uuidBytes[0], uuidBytes[1], uuidBytes[2], uuidBytes[3],
@@ -108,8 +105,20 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
                           uuidBytes[12], uuidBytes[13], uuidBytes[14], uuidBytes[15]))
     }
 
+    /// Generate a launchd-style label from a task name.
+    static func labelFromName(_ name: String) -> String {
+        let sanitized = name
+            .lowercased()
+            .replacingOccurrences(of: " ", with: "-")
+            .replacingOccurrences(of: "_", with: "-")
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
+            .joined()
+        let label = sanitized.isEmpty ? UUID().uuidString.lowercased() : sanitized
+        return "com.user.\(label)"
+    }
+
     var cronTag: String {
-        "# MacScheduler:\(id.uuidString)"
+        "# CronTask:\(launchdLabel)"
     }
 
     var isEnabled: Bool {
@@ -123,14 +132,10 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     var lastRunDate: Date { status.lastRun ?? .distantPast }
 
     func validate() -> [String] {
-        if isExternal {
-            return []
-        }
-
         var errors: [String] = []
 
-        if name.trimmingCharacters(in: .whitespaces).isEmpty {
-            errors.append("Task name is required")
+        if launchdLabel.trimmingCharacters(in: .whitespaces).isEmpty {
+            errors.append("Task label is required")
         }
 
         errors.append(contentsOf: action.validate())
@@ -166,10 +171,6 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
         }
         status.state = .enabled
     }
-
-    static func == (lhs: ScheduledTask, rhs: ScheduledTask) -> Bool {
-        lhs.id == rhs.id
-    }
 }
 
 extension ScheduledTask {
@@ -185,7 +186,7 @@ extension ScheduledTask {
             ),
             trigger: .calendar(minute: 0, hour: 2),
             status: TaskStatus(state: .enabled),
-            isExternal: false
+            launchdLabel: "com.user.backup-documents"
         )
     }
 }

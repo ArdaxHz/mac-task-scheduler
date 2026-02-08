@@ -3,6 +3,7 @@
 //  MacScheduler
 //
 //  ViewModel for managing the list of scheduled tasks.
+//  Fully stateless: reads all task data from live LaunchAgents/cron files.
 //
 
 import Foundation
@@ -27,14 +28,7 @@ class TaskListViewModel: ObservableObject {
         case neverRun = "Never Run"
     }
 
-    private let fileManager = FileManager.default
     private let historyService = TaskHistoryService.shared
-
-    private var tasksFileURL: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("MacScheduler")
-        return appDir.appendingPathComponent("tasks.json")
-    }
 
     var filteredTasks: [ScheduledTask] {
         var result = tasks
@@ -42,7 +36,8 @@ class TaskListViewModel: ObservableObject {
         if !searchText.isEmpty {
             result = result.filter {
                 $0.name.localizedCaseInsensitiveContains(searchText) ||
-                $0.description.localizedCaseInsensitiveContains(searchText)
+                $0.description.localizedCaseInsensitiveContains(searchText) ||
+                $0.launchdLabel.localizedCaseInsensitiveContains(searchText)
             }
         }
 
@@ -76,39 +71,89 @@ class TaskListViewModel: ObservableObject {
     }
 
     init() {
-        loadTasks()
-    }
-
-    func loadTasks() {
-        guard fileManager.fileExists(atPath: tasksFileURL.path) else {
-            return
-        }
-
-        do {
-            let data = try Data(contentsOf: tasksFileURL)
-            let decoder = JSONDecoder()
-            decoder.dateDecodingStrategy = .iso8601
-            tasks = try decoder.decode([ScheduledTask].self, from: data)
-        } catch {
-            showError(message: "Failed to load tasks: \(error.localizedDescription)")
+        Task {
+            await discoverAllTasks()
         }
     }
 
-    func saveTasks() {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let appDir = appSupport.appendingPathComponent("MacScheduler")
-
-        try? fileManager.createDirectory(at: appDir, withIntermediateDirectories: true)
+    /// Discover all tasks from live LaunchAgents and cron files.
+    func discoverAllTasks() async {
+        isLoading = true
+        defer { isLoading = false }
 
         do {
-            let encoder = JSONEncoder()
-            encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = .prettyPrinted
+            let launchdService = LaunchdService.shared
+            let cronService = CronService.shared
 
-            let data = try encoder.encode(tasks)
-            try data.write(to: tasksFileURL, options: .atomic)
+            let launchdTasks = try await launchdService.discoverTasks()
+            let cronTasks = try await cronService.discoverTasks()
+
+            // Dedup by task ID (deterministic UUID from label) — prefer user-writable over read-only
+            var tasksById: [UUID: ScheduledTask] = [:]
+            for task in launchdTasks {
+                if let existing = tasksById[task.id] {
+                    // Prefer user-writable over read-only
+                    if !task.isReadOnly && existing.isReadOnly {
+                        tasksById[task.id] = task
+                    }
+                } else {
+                    tasksById[task.id] = task
+                }
+            }
+            for task in cronTasks {
+                if tasksById[task.id] == nil {
+                    tasksById[task.id] = task
+                }
+            }
+
+            var allTasks = Array(tasksById.values)
+
+            // Enrich with native launchd info (only for loaded tasks)
+            let loadedLabels = await launchdService.getAllLoadedLabels()
+            for i in allTasks.indices where allTasks[i].backend == .launchd {
+                // stdout/stderr file mtime
+                if let lastRun = launchdService.getLastRunTime(for: allTasks[i]) {
+                    allTasks[i].status.lastRun = lastRun
+                }
+                // launchctl print info (only for loaded tasks — skip unloaded to avoid errors)
+                if loadedLabels.contains(allTasks[i].launchdLabel) {
+                    if let info = await launchdService.getLaunchdInfo(for: allTasks[i]) {
+                        allTasks[i].status.runCount = info.runs
+                    }
+                }
+            }
+
+            // Merge app execution history as fallback for last run time
+            for i in allTasks.indices {
+                let taskHistory = await historyService.getHistory(for: allTasks[i].id)
+                if let latestRun = taskHistory.first {
+                    // Use app history if no native last run, or if app history is more recent
+                    if allTasks[i].status.lastRun == nil || latestRun.endTime > (allTasks[i].status.lastRun ?? .distantPast) {
+                        allTasks[i].status.lastRun = latestRun.endTime
+                    }
+                    if allTasks[i].status.lastResult == nil {
+                        allTasks[i].status.lastResult = latestRun
+                    }
+                    // Use history run count if native count is 0
+                    if allTasks[i].status.runCount == 0 {
+                        allTasks[i].status.runCount = taskHistory.count
+                    }
+                    allTasks[i].status.failureCount = taskHistory.filter { !$0.success }.count
+                }
+            }
+
+            allTasks.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
+            tasks = allTasks
+
+            // Update selected task if it still exists
+            if let selected = selectedTask,
+               let updated = tasks.first(where: { $0.launchdLabel == selected.launchdLabel }) {
+                selectedTask = updated
+            } else if selectedTask != nil {
+                selectedTask = nil
+            }
         } catch {
-            showError(message: "Failed to save tasks: \(error.localizedDescription)")
+            showError(message: "Failed to discover tasks: \(error.localizedDescription)")
         }
     }
 
@@ -120,14 +165,19 @@ class TaskListViewModel: ObservableObject {
             let service = SchedulerServiceFactory.service(for: task.backend)
             try await service.install(task: task)
 
-            let newTask = task
-            if newTask.status.state == .enabled {
-                try await service.enable(task: newTask)
+            // Always load into launchd to register the daemon
+            try await service.enable(task: task)
+
+            // If user wants it disabled, unload after registering
+            if !task.isEnabled {
+                try await service.disable(task: task)
             }
 
-            tasks.append(newTask)
-            saveTasks()
-            selectedTask = newTask
+            // Re-discover to pick up the new task from live files
+            await discoverAllTasks()
+
+            // Select the newly created task
+            selectedTask = tasks.first { $0.launchdLabel == task.launchdLabel }
         } catch {
             showError(message: error.localizedDescription)
         }
@@ -137,29 +187,36 @@ class TaskListViewModel: ObservableObject {
         isLoading = true
         defer { isLoading = false }
 
-        guard let index = tasks.firstIndex(where: { $0.id == task.id }) else {
+        guard let oldTask = tasks.first(where: { $0.id == task.id }) else {
             showError(message: "Task not found")
             return
         }
 
         do {
-            let oldTask = tasks[index]
-            let service = SchedulerServiceFactory.service(for: task.backend)
-
-            if oldTask.backend != task.backend {
-                let oldService = SchedulerServiceFactory.service(for: oldTask.backend)
-                try await oldService.uninstall(task: oldTask)
-                try await service.install(task: task)
+            if task.backend == .launchd {
+                let launchdService = LaunchdService.shared
+                try await launchdService.updateTask(oldTask: oldTask, newTask: task)
             } else {
-                try await service.update(task: task)
+                let service = SchedulerServiceFactory.service(for: task.backend)
+
+                if oldTask.backend != task.backend {
+                    let oldService = SchedulerServiceFactory.service(for: oldTask.backend)
+                    try await oldService.uninstall(task: oldTask)
+                } else {
+                    try await service.uninstall(task: oldTask)
+                }
+
+                try await service.install(task: task)
+                if task.isEnabled {
+                    try await service.enable(task: task)
+                }
             }
 
-            tasks[index] = task
-            saveTasks()
+            // Re-discover to reflect changes from live files
+            await discoverAllTasks()
 
-            if selectedTask?.id == task.id {
-                selectedTask = task
-            }
+            // Select the updated task
+            selectedTask = tasks.first { $0.launchdLabel == task.launchdLabel }
         } catch {
             showError(message: error.localizedDescription)
         }
@@ -173,46 +230,33 @@ class TaskListViewModel: ObservableObject {
             let service = SchedulerServiceFactory.service(for: task.backend)
             try await service.uninstall(task: task)
 
-            tasks.removeAll { $0.id == task.id }
-            saveTasks()
-
             if selectedTask?.id == task.id {
                 selectedTask = nil
             }
 
             await historyService.clearHistory(for: task.id)
+
+            // Re-discover to reflect deletion
+            await discoverAllTasks()
         } catch {
             showError(message: error.localizedDescription)
         }
     }
 
     func toggleTaskEnabled(_ task: ScheduledTask) async {
-        var updatedTask = task
-        if task.isEnabled {
-            updatedTask.disable()
-        } else {
-            updatedTask.enable()
-        }
-
         isLoading = true
         defer { isLoading = false }
 
         do {
             let service = SchedulerServiceFactory.service(for: task.backend)
-            if updatedTask.isEnabled {
-                try await service.enable(task: task)
-            } else {
+            if task.isEnabled {
                 try await service.disable(task: task)
+            } else {
+                try await service.enable(task: task)
             }
 
-            if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                tasks[index] = updatedTask
-                saveTasks()
-
-                if selectedTask?.id == task.id {
-                    selectedTask = updatedTask
-                }
-            }
+            // Re-discover to refresh state from live sources
+            await discoverAllTasks()
         } catch {
             showError(message: error.localizedDescription)
         }
@@ -224,23 +268,12 @@ class TaskListViewModel: ObservableObject {
 
         do {
             let service = SchedulerServiceFactory.service(for: task.backend)
-
-            if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                tasks[index].markRunning()
-            }
-
             let result = try await service.runNow(task: task)
 
             await historyService.recordExecution(result)
 
-            if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-                tasks[index].recordExecution(result)
-                saveTasks()
-
-                if selectedTask?.id == task.id {
-                    selectedTask = tasks[index]
-                }
-            }
+            // Re-discover to refresh state
+            await discoverAllTasks()
 
             if !result.success {
                 showError(message: "Task failed with exit code \(result.exitCode)")
@@ -250,56 +283,69 @@ class TaskListViewModel: ObservableObject {
         }
     }
 
-    func discoverExistingTasks() async {
+    func loadDaemon(_ task: ScheduledTask) async {
         isLoading = true
         defer { isLoading = false }
 
         do {
-            let launchdService = LaunchdService.shared
-            let cronService = CronService.shared
-
-            let launchdTasks = try await launchdService.discoverTasks()
-            let cronTasks = try await cronService.discoverTasks()
-
-            let existingIds = Set(tasks.map { $0.id })
-
-            for task in launchdTasks where !existingIds.contains(task.id) {
-                tasks.append(task)
-            }
-
-            for task in cronTasks where !existingIds.contains(task.id) {
-                tasks.append(task)
-            }
-
-            saveTasks()
+            let service = SchedulerServiceFactory.service(for: task.backend)
+            try await service.enable(task: task)
+            await discoverAllTasks()
         } catch {
-            showError(message: "Failed to discover tasks: \(error.localizedDescription)")
+            showError(message: error.localizedDescription)
         }
     }
 
-    func refreshAll() async {
+    func unloadDaemon(_ task: ScheduledTask) async {
         isLoading = true
         defer { isLoading = false }
 
-        loadTasks()
-
-        for task in tasks {
-            await refreshTaskStatus(task)
+        do {
+            let service = SchedulerServiceFactory.service(for: task.backend)
+            try await service.disable(task: task)
+            await discoverAllTasks()
+        } catch {
+            showError(message: error.localizedDescription)
         }
     }
 
-    func refreshTaskStatus(_ task: ScheduledTask) async {
-        let service = SchedulerServiceFactory.service(for: task.backend)
-        let isRunning = await service.isRunning(task: task)
+    func loadAllDaemons() async {
+        isLoading = true
+        defer { isLoading = false }
 
-        if let index = tasks.firstIndex(where: { $0.id == task.id }) {
-            if isRunning && tasks[index].status.state != .running {
-                tasks[index].status.state = .enabled
-            } else if !isRunning && tasks[index].status.state == .running {
-                tasks[index].status.state = .enabled
+        let launchdTasks = tasks.filter { $0.backend == .launchd && !$0.isEnabled && !$0.isReadOnly }
+        for task in launchdTasks {
+            do {
+                try await LaunchdService.shared.enable(task: task)
+            } catch {
+                // Continue loading others even if one fails
             }
-            saveTasks()
         }
+        await discoverAllTasks()
+    }
+
+    func unloadAllDaemons() async {
+        isLoading = true
+        defer { isLoading = false }
+
+        let launchdTasks = tasks.filter { $0.backend == .launchd && $0.isEnabled && !$0.isReadOnly }
+        for task in launchdTasks {
+            do {
+                try await LaunchdService.shared.disable(task: task)
+            } catch {
+                // Continue unloading others even if one fails
+            }
+        }
+        await discoverAllTasks()
+    }
+
+    func refreshAll() async {
+        await discoverAllTasks()
+    }
+
+    func refreshTaskStatus(_ task: ScheduledTask) async {
+        // Just re-discover everything for consistency
+        await discoverAllTasks()
     }
 
     private func showError(message: String) {

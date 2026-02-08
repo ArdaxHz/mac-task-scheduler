@@ -17,6 +17,53 @@ jobs:
       - name: Select Xcode
         run: sudo xcode-select -s /Applications/Xcode_15.4.app || sudo xcode-select -s /Applications/Xcode.app
 
+      - name: Create signing certificate
+        run: |
+          # Create a self-signed code signing certificate for the CI build
+          cat > $RUNNER_TEMP/cert.conf << 'CERTEOF'
+          [ req ]
+          default_bits       = 2048
+          distinguished_name = req_dn
+          x509_extensions    = codesign_ext
+          prompt             = no
+          [ req_dn ]
+          CN = Mac Task Scheduler Dev
+          [ codesign_ext ]
+          keyUsage               = critical, digitalSignature
+          extendedKeyUsage       = critical, codeSigning
+          basicConstraints       = critical, CA:false
+          CERTEOF
+
+          openssl req -x509 -newkey rsa:2048 \
+            -keyout $RUNNER_TEMP/key.pem \
+            -out $RUNNER_TEMP/cert.pem \
+            -days 365 -nodes \
+            -config $RUNNER_TEMP/cert.conf
+
+          openssl pkcs12 -export \
+            -out $RUNNER_TEMP/cert.p12 \
+            -inkey $RUNNER_TEMP/key.pem \
+            -in $RUNNER_TEMP/cert.pem \
+            -passout pass:buildcert \
+            -legacy
+
+          # Create a temporary keychain
+          security create-keychain -p "" $RUNNER_TEMP/build.keychain
+          security default-keychain -s $RUNNER_TEMP/build.keychain
+          security unlock-keychain -p "" $RUNNER_TEMP/build.keychain
+          security set-keychain-settings -lut 3600 $RUNNER_TEMP/build.keychain
+
+          # Import certificate and trust it
+          security import $RUNNER_TEMP/cert.p12 \
+            -k $RUNNER_TEMP/build.keychain \
+            -P buildcert \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k $RUNNER_TEMP/build.keychain $RUNNER_TEMP/cert.pem
+          security set-key-partition-list -S apple-tool:,apple: -s \
+            -k "" $RUNNER_TEMP/build.keychain
+
       - name: Build archive
         run: |
           xcodebuild archive \
@@ -25,26 +72,29 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=macOS' \
             -archivePath $RUNNER_TEMP/MacScheduler.xcarchive \
-            CODE_SIGN_IDENTITY="-" \
-            CODE_SIGNING_REQUIRED=NO \
-            CODE_SIGNING_ALLOWED=NO
+            CODE_SIGN_IDENTITY="Mac Task Scheduler Dev" \
+            CODE_SIGN_STYLE=Manual \
+            OTHER_CODE_SIGN_FLAGS="--timestamp=none"
 
-      - name: Export app
+      - name: Export and sign app
         run: |
           mkdir -p $RUNNER_TEMP/export
           cp -R $RUNNER_TEMP/MacScheduler.xcarchive/Products/Applications/*.app $RUNNER_TEMP/export/
 
-      - name: Create DMG
-        run: |
-          APP_NAME="Mac Task Scheduler"
-          hdiutil create -volname "$APP_NAME" \
-            -srcfolder $RUNNER_TEMP/export \
-            -ov -format UDZO \
-            $RUNNER_TEMP/MacTaskScheduler.dmg
+          # Deep sign the app bundle
+          codesign --force --deep --sign "Mac Task Scheduler Dev" \
+            --entitlements MacScheduler/MacScheduler.entitlements \
+            --timestamp=none \
+            "$RUNNER_TEMP/export/Mac Task Scheduler.app"
+
+          # Verify signature
+          codesign --verify --verbose "$RUNNER_TEMP/export/Mac Task Scheduler.app"
 
       - name: Create zip
         run: |
           cd $RUNNER_TEMP/export
+          # Remove quarantine attributes before zipping
+          xattr -cr "Mac Task Scheduler.app"
           zip -r $RUNNER_TEMP/MacTaskScheduler.zip *.app
 
       - name: Generate version tag
@@ -56,6 +106,10 @@ jobs:
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "app_version=$APP_VERSION" >> $GITHUB_OUTPUT
 
+      - name: Cleanup keychain
+        if: always()
+        run: security delete-keychain $RUNNER_TEMP/build.keychain 2>/dev/null || true
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -64,7 +118,11 @@ jobs:
           body: |
             **Version:** ${{ steps.version.outputs.app_version }}
             **Commit:** ${{ github.event.head_commit.message }}
+
+            **Note:** If macOS shows a security warning when opening the app, right-click the app and select "Open", or run:
+            ```
+            xattr -cr "Mac Task Scheduler.app"
+            ```
           files: |
-            ${{ runner.temp }}/MacTaskScheduler.dmg
             ${{ runner.temp }}/MacTaskScheduler.zip
           make_latest: true

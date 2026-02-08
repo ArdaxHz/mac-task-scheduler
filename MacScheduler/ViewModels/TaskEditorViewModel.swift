@@ -12,6 +12,7 @@ import SwiftUI
 class TaskEditorViewModel: ObservableObject {
     @Published var name: String = ""
     @Published var taskDescription: String = ""
+    @Published var taskLabel: String = ""
     @Published var backend: SchedulerBackend = .launchd
     @Published var actionType: TaskActionType = .executable
     @Published var executablePath: String = ""
@@ -70,20 +71,33 @@ class TaskEditorViewModel: ObservableObject {
         editingTask = task
         name = task.name
         taskDescription = task.description
+        taskLabel = task.launchdLabel
         backend = task.backend
 
         actionType = task.action.type
         workingDirectory = task.action.workingDirectory ?? ""
         scriptContent = task.action.scriptContent ?? ""
 
+        // For shell/apple scripts with file-based content, read the script file
+        if scriptContent.isEmpty && (task.action.type == .shellScript || task.action.type == .appleScript) {
+            let candidatePath = resolveScriptPath(task)
+            if let path = candidatePath, FileManager.default.fileExists(atPath: path) {
+                scriptContent = (try? String(contentsOfFile: path, encoding: .utf8)) ?? ""
+            }
+        }
+
         // For shell scripts, extract the actual script path from arguments
         if task.action.type == .shellScript {
             let path = task.action.path
-            if path.hasSuffix("bash") || path.hasSuffix("sh") || path.hasSuffix("zsh") {
-                // The shell binary is in path, script path is in arguments
-                if let scriptPath = task.action.arguments.first, !scriptPath.hasPrefix("-") {
-                    executablePath = scriptPath
+            let shellBinaries = ["bash", "sh", "zsh", "fish", "dash"]
+            let isShellBinary = shellBinaries.contains(where: { path.hasSuffix("/\($0)") })
+            if isShellBinary {
+                if let firstArg = task.action.arguments.first, !firstArg.hasPrefix("-") {
+                    executablePath = firstArg
                     arguments = task.action.arguments.dropFirst().joined(separator: " ")
+                } else if task.action.arguments.first == "-c" {
+                    executablePath = ""
+                    arguments = ""
                 } else {
                     executablePath = ""
                     arguments = task.action.arguments.joined(separator: " ")
@@ -95,10 +109,12 @@ class TaskEditorViewModel: ObservableObject {
         } else if task.action.type == .appleScript {
             let path = task.action.path
             if path.hasSuffix("osascript") {
-                // osascript is in path, script path is in arguments
-                if let scriptPath = task.action.arguments.first, !scriptPath.hasPrefix("-") {
-                    executablePath = scriptPath
+                if let firstArg = task.action.arguments.first, !firstArg.hasPrefix("-") {
+                    executablePath = firstArg
                     arguments = task.action.arguments.dropFirst().joined(separator: " ")
+                } else if task.action.arguments.first == "-e" {
+                    executablePath = ""
+                    arguments = ""
                 } else {
                     executablePath = ""
                     arguments = task.action.arguments.joined(separator: " ")
@@ -148,6 +164,7 @@ class TaskEditorViewModel: ObservableObject {
         editingTask = nil
         name = ""
         taskDescription = ""
+        taskLabel = ""
         backend = .launchd
         actionType = .executable
         executablePath = ""
@@ -170,11 +187,34 @@ class TaskEditorViewModel: ObservableObject {
         showValidationErrors = false
     }
 
+    /// Auto-generate label from name if label is empty or was auto-generated.
+    func updateLabelFromName() {
+        if !isEditing && (taskLabel.isEmpty || taskLabel == ScheduledTask.labelFromName(name.trimmingCharacters(in: .whitespaces).isEmpty ? "" : String(name.dropLast()))) {
+            taskLabel = ScheduledTask.labelFromName(name)
+        }
+    }
+
+    /// Check if a path is inside a macOS TCC-protected directory.
+    static func isTCCProtected(_ path: String) -> Bool {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let protectedDirs = [
+            "\(home)/Documents",
+            "\(home)/Desktop",
+            "\(home)/Downloads",
+        ]
+        let expandedPath = NSString(string: path).expandingTildeInPath
+        return protectedDirs.contains { expandedPath.hasPrefix($0) }
+    }
+
     func validate() -> Bool {
         validationErrors = []
 
         if name.trimmingCharacters(in: .whitespaces).isEmpty {
             validationErrors.append("Task name is required")
+        }
+
+        if taskLabel.trimmingCharacters(in: .whitespaces).isEmpty {
+            validationErrors.append("Task label is required")
         }
 
         switch actionType {
@@ -192,6 +232,7 @@ class TaskEditorViewModel: ObservableObject {
             }
         }
 
+
         if backend == .cron && !triggerType.supportsCron {
             validationErrors.append("'\(triggerType.rawValue)' trigger is not supported by cron")
         }
@@ -204,7 +245,82 @@ class TaskEditorViewModel: ObservableObject {
         return validationErrors.isEmpty
     }
 
+    /// Scripts directory from user preferences, falling back to ~/Library/Scripts.
+    static var scriptsDirectory: String {
+        let custom = UserDefaults.standard.string(forKey: "scriptsDirectory") ?? ""
+        if !custom.isEmpty { return custom }
+        return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Scripts").path
+    }
+
+    /// Copy a file from a TCC-protected path to the scripts directory and return the new path.
+    @discardableResult
+    func copyFileToScriptsDirectory(from sourcePath: String) -> String? {
+        let fm = FileManager.default
+        let scriptsDir = Self.scriptsDirectory
+        let destDir = URL(fileURLWithPath: scriptsDir)
+
+        // Ensure scripts directory exists
+        try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
+
+        let fileName = (sourcePath as NSString).lastPathComponent
+        var destPath = destDir.appendingPathComponent(fileName).path
+
+        // Handle name collision
+        if fm.fileExists(atPath: destPath) {
+            let baseName = (fileName as NSString).deletingPathExtension
+            let ext = (fileName as NSString).pathExtension
+            var counter = 1
+            repeat {
+                let newName = ext.isEmpty ? "\(baseName)_\(counter)" : "\(baseName)_\(counter).\(ext)"
+                destPath = destDir.appendingPathComponent(newName).path
+                counter += 1
+            } while fm.fileExists(atPath: destPath)
+        }
+
+        do {
+            try fm.copyItem(atPath: sourcePath, toPath: destPath)
+            // Make executable
+            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destPath)
+            return destPath
+        } catch {
+            return nil
+        }
+    }
+
+    /// Resolve the script file path from a task's action (shell binary + arguments pattern).
+    private func resolveScriptPath(_ task: ScheduledTask) -> String? {
+        let path = task.action.path
+        let shellBinaries = ["bash", "sh", "zsh", "fish", "dash", "osascript"]
+        let isShellBinary = shellBinaries.contains(where: { path.hasSuffix("/\($0)") })
+
+        if isShellBinary {
+            // Script path is typically the first non-flag argument
+            for arg in task.action.arguments {
+                if !arg.hasPrefix("-") && FileManager.default.fileExists(atPath: arg) {
+                    return arg
+                }
+            }
+        } else if !path.isEmpty && FileManager.default.fileExists(atPath: path) {
+            return path
+        }
+        return nil
+    }
+
     func buildTask() -> ScheduledTask {
+        // For file-based scripts, write edited content back to the file
+        // and don't embed it inline in the plist
+        var inlineScript: String? = nil
+        if (actionType == .shellScript || actionType == .appleScript) && !scriptContent.isEmpty {
+            if !executablePath.isEmpty {
+                // File-based script: save content back to the file
+                try? scriptContent.write(toFile: executablePath, atomically: true, encoding: .utf8)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executablePath)
+            } else {
+                // No file path: use as inline script content
+                inlineScript = scriptContent
+            }
+        }
+
         let action = TaskAction(
             id: editingTask?.action.id ?? UUID(),
             type: actionType,
@@ -212,7 +328,7 @@ class TaskEditorViewModel: ObservableObject {
             arguments: arguments.isEmpty ? [] : arguments.components(separatedBy: " "),
             workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory,
             environmentVariables: [:],
-            scriptContent: scriptContent.isEmpty ? nil : scriptContent
+            scriptContent: inlineScript
         )
 
         var trigger: TaskTrigger
@@ -244,7 +360,7 @@ class TaskEditorViewModel: ObservableObject {
         }
 
         return ScheduledTask(
-            id: editingTask?.id ?? UUID(),
+            id: editingTask?.id ?? ScheduledTask.uuidFromLabel(taskLabel),
             name: name.trimmingCharacters(in: .whitespaces),
             description: taskDescription,
             backend: backend,
@@ -256,7 +372,10 @@ class TaskEditorViewModel: ObservableObject {
             runAtLoad: runAtLoad,
             keepAlive: keepAlive,
             standardOutPath: standardOutPath.isEmpty ? nil : standardOutPath,
-            standardErrorPath: standardErrorPath.isEmpty ? nil : standardErrorPath
+            standardErrorPath: standardErrorPath.isEmpty ? nil : standardErrorPath,
+            launchdLabel: taskLabel,
+            isReadOnly: editingTask?.isReadOnly ?? false,
+            plistFilePath: editingTask?.plistFilePath
         )
     }
 }

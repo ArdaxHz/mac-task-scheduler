@@ -16,6 +16,7 @@
 		A100000D231A0001 /* LaunchdService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A100000E231A0001 /* LaunchdService.swift */; };
 		A100000F231A0001 /* CronService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000010231A0001 /* CronService.swift */; };
 		A1000011231A0001 /* TaskHistoryService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000012231A0001 /* TaskHistoryService.swift */; };
+		A1000030231A0001 /* UpdateService.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000031231A0001 /* UpdateService.swift */; };
 		A1000013231A0001 /* ShellExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000014231A0001 /* ShellExecutor.swift */; };
 		A1000015231A0001 /* PlistGenerator.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000016231A0001 /* PlistGenerator.swift */; };
 		A1000017231A0001 /* CronParser.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000018231A0001 /* CronParser.swift */; };
@@ -43,6 +44,7 @@
 		A100000E231A0001 /* LaunchdService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LaunchdService.swift; sourceTree = "<group>"; };
 		A1000010231A0001 /* CronService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CronService.swift; sourceTree = "<group>"; };
 		A1000012231A0001 /* TaskHistoryService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TaskHistoryService.swift; sourceTree = "<group>"; };
+		A1000031231A0001 /* UpdateService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UpdateService.swift; sourceTree = "<group>"; };
 		A1000014231A0001 /* ShellExecutor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShellExecutor.swift; sourceTree = "<group>"; };
 		A1000016231A0001 /* PlistGenerator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlistGenerator.swift; sourceTree = "<group>"; };
 		A1000018231A0001 /* CronParser.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CronParser.swift; sourceTree = "<group>"; };
@@ -128,6 +130,7 @@
 				A100000E231A0001 /* LaunchdService.swift */,
 				A1000010231A0001 /* CronService.swift */,
 				A1000012231A0001 /* TaskHistoryService.swift */,
+				A1000031231A0001 /* UpdateService.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -244,6 +247,7 @@
 				A100000D231A0001 /* LaunchdService.swift in Sources */,
 				A100000F231A0001 /* CronService.swift in Sources */,
 				A1000011231A0001 /* TaskHistoryService.swift in Sources */,
+				A1000030231A0001 /* UpdateService.swift in Sources */,
 				A1000013231A0001 /* ShellExecutor.swift in Sources */,
 				A1000015231A0001 /* PlistGenerator.swift in Sources */,
 				A1000017231A0001 /* CronParser.swift in Sources */,
@@ -387,7 +391,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MacScheduler/MacScheduler.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Mac Task Scheduler Dev";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -399,7 +404,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mactaskscheduler.app;
 				PRODUCT_NAME = "Mac Task Scheduler";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -413,7 +418,8 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = MacScheduler/MacScheduler.entitlements;
-				CODE_SIGN_STYLE = Automatic;
+				CODE_SIGN_IDENTITY = "Mac Task Scheduler Dev";
+				CODE_SIGN_STYLE = Manual;
 				COMBINE_HIDPI_IMAGES = YES;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = "";
@@ -425,7 +431,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.1.0;
+				MARKETING_VERSION = 1.2.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mactaskscheduler.app;
 				PRODUCT_NAME = "Mac Task Scheduler";
 				SWIFT_EMIT_LOC_STRINGS = YES;

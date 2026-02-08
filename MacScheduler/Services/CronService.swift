@@ -12,7 +12,7 @@ class CronService: SchedulerService {
     let backend: SchedulerBackend = .cron
 
     private let shellExecutor = ShellExecutor.shared
-    private let tagPrefix = "# MacScheduler:"
+    private let tagPrefix = "# CronTask:"
 
     private init() {}
 
@@ -44,7 +44,7 @@ class CronService: SchedulerService {
 
     func enable(task: ScheduledTask) async throws {
         var currentCrontab = try await getCurrentCrontab()
-        let tag = "\(tagPrefix)\(task.id.uuidString)"
+        let tag = task.cronTag
 
         currentCrontab = currentCrontab.map { line in
             if line.contains(tag) && line.hasPrefix("#") && !line.hasPrefix(tagPrefix) {
@@ -62,7 +62,7 @@ class CronService: SchedulerService {
 
     func disable(task: ScheduledTask) async throws {
         var currentCrontab = try await getCurrentCrontab()
-        let tag = "\(tagPrefix)\(task.id.uuidString)"
+        let tag = task.cronTag
 
         currentCrontab = currentCrontab.map { line in
             if line.contains(tag) && !line.hasPrefix("#") {
@@ -131,7 +131,7 @@ class CronService: SchedulerService {
     func isInstalled(task: ScheduledTask) async -> Bool {
         do {
             let crontab = try await getCurrentCrontab()
-            let tag = "\(tagPrefix)\(task.id.uuidString)"
+            let tag = task.cronTag
             return crontab.contains { $0.contains(tag) }
         } catch {
             return false
@@ -141,7 +141,7 @@ class CronService: SchedulerService {
     func isRunning(task: ScheduledTask) async -> Bool {
         do {
             let crontab = try await getCurrentCrontab()
-            let tag = "\(tagPrefix)\(task.id.uuidString)"
+            let tag = task.cronTag
             return crontab.contains { line in
                 line.contains(tag) && !line.hasPrefix("#")
             }
@@ -159,10 +159,10 @@ class CronService: SchedulerService {
             let line = crontab[i]
 
             if line.hasPrefix(tagPrefix) {
-                let uuidString = String(line.dropFirst(tagPrefix.count))
-                if let uuid = UUID(uuidString: uuidString), i + 1 < crontab.count {
+                let label = String(line.dropFirst(tagPrefix.count))
+                if i + 1 < crontab.count {
                     let cronLine = crontab[i + 1]
-                    if let task = parseCronLine(cronLine, uuid: uuid) {
+                    if let task = parseCronLine(cronLine, label: label) {
                         tasks.append(task)
                     }
                     i += 2
@@ -215,7 +215,7 @@ class CronService: SchedulerService {
     }
 
     private func removeCronEntry(for task: ScheduledTask, from crontab: [String]) -> [String] {
-        let tag = "\(tagPrefix)\(task.id.uuidString)"
+        let tag = task.cronTag
         var result: [String] = []
         var skipNext = false
 
@@ -265,11 +265,11 @@ class CronService: SchedulerService {
             }
         }
 
-        let tag = "\(tagPrefix)\(task.id.uuidString)"
+        let tag = task.cronTag
         return "\(tag)\n\(cronExpr.expression) \(command)"
     }
 
-    private func parseCronLine(_ line: String, uuid: UUID) -> ScheduledTask? {
+    private func parseCronLine(_ line: String, label: String) -> ScheduledTask? {
         var workingLine = line
         let isDisabled = line.hasPrefix("# ")
         if isDisabled {
@@ -288,7 +288,9 @@ class CronService: SchedulerService {
 
         let command = components.dropFirst(5).joined(separator: " ")
 
-        var task = ScheduledTask(id: uuid)
+        let uuid = ScheduledTask.uuidFromLabel(label)
+        var task = ScheduledTask(id: uuid, launchdLabel: label)
+        task.name = label
         task.backend = .cron
         task.trigger = TaskTrigger(
             type: .calendar,

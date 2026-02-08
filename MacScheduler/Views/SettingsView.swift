@@ -10,13 +10,21 @@ import SwiftUI
 struct SettingsView: View {
     @AppStorage("defaultBackend") private var defaultBackend = SchedulerBackend.launchd.rawValue
     @AppStorage("showNotifications") private var showNotifications = true
+    @AppStorage("autoCheckUpdates") private var autoCheckUpdates = true
     @AppStorage("logRetentionDays") private var logRetentionDays = 30
     @AppStorage("scriptsDirectory") private var scriptsDirectory = ""
     @State private var showDirectoryPicker = false
+    @State private var showResetConfirmation = false
+    @State private var updateCheckState: UpdateCheckState = .idle
+    @State private var availableUpdate: UpdateService.Release?
+
+    enum UpdateCheckState {
+        case idle, checking, upToDate, updateAvailable, error
+    }
 
     private var defaultScriptsDirectory: String {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/Library/Application Support/MacScheduler/Scripts"
+        return "\(home)/Library/Scripts"
     }
 
     private var displayScriptsDirectory: String {
@@ -46,6 +54,28 @@ struct SettingsView: View {
                 }
         }
         .frame(width: 550, height: 350)
+        .confirmationDialog("Reset App", isPresented: $showResetConfirmation) {
+            Button("Reset Everything", role: .destructive) {
+                resetApp()
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will delete all tasks, execution history, and remove all MacScheduler LaunchAgent plists. This cannot be undone.")
+        }
+    }
+
+    private func resetApp() {
+        let fm = FileManager.default
+
+        // Remove app data directory (execution history, scripts)
+        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let appDir = appSupport.appendingPathComponent("MacScheduler")
+        try? fm.removeItem(at: appDir)
+
+        // Reset UserDefaults
+        if let bundleId = Bundle.main.bundleIdentifier {
+            UserDefaults.standard.removePersistentDomain(forName: bundleId)
+        }
     }
 
     private var generalSettings: some View {
@@ -87,11 +117,13 @@ struct SettingsView: View {
                         Button("Choose...") {
                             showDirectoryPicker = true
                         }
+                        .help("Choose a custom scripts directory")
 
                         Button("Reset") {
                             scriptsDirectory = ""
                         }
                         .disabled(scriptsDirectory.isEmpty)
+                        .help("Reset to default ~/Library/Scripts/")
                     }
 
                     Button("Open in Finder") {
@@ -100,24 +132,30 @@ struct SettingsView: View {
                         NSWorkspace.shared.open(url)
                     }
                     .buttonStyle(.link)
+                    .help("Open scripts directory in Finder")
                 }
             }
 
             Section("Data Locations") {
                 VStack(alignment: .leading, spacing: 8) {
                     LocationRow(
-                        label: "Tasks Database",
-                        path: "~/Library/Application Support/MacScheduler/tasks.json"
+                        label: "User Launch Agents",
+                        path: "~/Library/LaunchAgents/"
+                    )
+
+                    LocationRow(
+                        label: "System Launch Agents",
+                        path: "/Library/LaunchAgents/"
+                    )
+
+                    LocationRow(
+                        label: "System Daemons",
+                        path: "/Library/LaunchDaemons/"
                     )
 
                     LocationRow(
                         label: "Execution History",
                         path: "~/Library/Application Support/MacScheduler/history.json"
-                    )
-
-                    LocationRow(
-                        label: "Launchd Plists",
-                        path: "~/Library/LaunchAgents/"
                     )
                 }
             }
@@ -160,9 +198,88 @@ struct SettingsView: View {
                         .foregroundColor(.secondary)
                 }
             }
+
+            Section("Updates") {
+                HStack {
+                    switch updateCheckState {
+                    case .idle:
+                        Text("Check for updates to see if a new version is available.")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    case .checking:
+                        ProgressView()
+                            .controlSize(.small)
+                        Text("Checking for updates...")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    case .upToDate:
+                        Image(systemName: "checkmark.circle.fill")
+                            .foregroundColor(.green)
+                        Text("You're up to date (v\(appVersion))")
+                            .font(.caption)
+                    case .updateAvailable:
+                        Image(systemName: "arrow.down.circle.fill")
+                            .foregroundColor(.blue)
+                        if let update = availableUpdate {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Version \(update.version) is available")
+                                    .font(.caption)
+                                    .fontWeight(.medium)
+                                if !update.body.isEmpty {
+                                    Text(update.body)
+                                        .font(.caption2)
+                                        .foregroundColor(.secondary)
+                                        .lineLimit(3)
+                                }
+                            }
+                        }
+                    case .error:
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundColor(.orange)
+                        Text("Could not check for updates")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+
+                    Spacer()
+                }
+
+                Toggle("Automatically check for updates on launch", isOn: $autoCheckUpdates)
+                    .help("When enabled, the app checks GitHub for new releases each time it launches")
+
+                HStack {
+                    Button("Check for Updates") {
+                        checkForUpdate()
+                    }
+                    .disabled(updateCheckState == .checking)
+                    .help("Check GitHub for a newer release")
+
+                    if case .updateAvailable = updateCheckState, let update = availableUpdate {
+                        Button("Download") {
+                            if let url = URL(string: update.htmlURL) {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        .help("Open the release page in your browser")
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .padding()
+    }
+
+    private func checkForUpdate() {
+        updateCheckState = .checking
+        Task {
+            let release = await UpdateService.shared.checkForUpdate()
+            if let release = release {
+                availableUpdate = release
+                updateCheckState = .updateAvailable
+            } else {
+                updateCheckState = .upToDate
+            }
+        }
     }
 
     private var advancedSettings: some View {
@@ -184,7 +301,12 @@ struct SettingsView: View {
                         await TaskHistoryService.shared.clearAllHistory()
                     }
                 }
-                .help("Delete all task execution history")
+                .help("Delete all task execution history permanently")
+
+                Button("Reset App", role: .destructive) {
+                    showResetConfirmation = true
+                }
+                .help("Delete all app data and reset to factory defaults")
             }
         }
         .formStyle(.grouped)
@@ -218,6 +340,7 @@ struct LocationRow: View {
                 Image(systemName: "folder")
             }
             .buttonStyle(.borderless)
+            .help("Reveal in Finder")
         }
     }
 }

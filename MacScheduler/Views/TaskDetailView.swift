@@ -35,8 +35,8 @@ struct TaskDetailView: View {
     var body: some View {
         VStack(spacing: 0) {
             headerSection
-                .padding([.horizontal, .top])
-                .padding(.bottom, 8)
+                .padding(.horizontal)
+                .padding(.vertical, 10)
                 .background(Color(.windowBackgroundColor))
 
             Divider()
@@ -67,6 +67,7 @@ struct TaskDetailView: View {
                 } label: {
                     Label("Run Now", systemImage: "play.fill")
                 }
+                .help("Execute this task immediately")
                 .disabled(viewModel.isLoading)
 
                 Button {
@@ -78,6 +79,7 @@ struct TaskDetailView: View {
                         Label("Enable", systemImage: "checkmark")
                     }
                 }
+                .help(task.isEnabled ? "Unload task from launchd" : "Load task into launchd")
                 .disabled(viewModel.isLoading)
 
                 Button {
@@ -85,12 +87,16 @@ struct TaskDetailView: View {
                 } label: {
                     Label("Edit", systemImage: "pencil")
                 }
+                .help("Edit task configuration")
+                .disabled(task.isReadOnly)
 
                 Button(role: .destructive) {
                     showDeleteConfirmation = true
                 } label: {
                     Label("Delete", systemImage: "trash")
                 }
+                .help("Delete this task and its plist file")
+                .disabled(task.isReadOnly)
             }
         }
         .confirmationDialog("Delete Task", isPresented: $showDeleteConfirmation) {
@@ -116,34 +122,22 @@ struct TaskDetailView: View {
                     .foregroundColor(statusColor(for: task.status.state))
 
                 VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 6) {
-                        Text(task.status.state.rawValue)
-                            .font(.headline)
-                        if task.isExternal {
-                            Text("External")
-                                .font(.caption)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Color.purple.opacity(0.2))
-                                .foregroundColor(.purple)
-                                .cornerRadius(4)
-                        }
-                    }
+                    Text(task.status.state.rawValue)
+                        .font(.headline)
+                    Text(task.launchdLabel)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundColor(.secondary)
+                        .textSelection(.enabled)
                     if !task.description.isEmpty {
                         Text(task.description)
                             .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                    if let label = task.externalLabel {
-                        Text(label)
-                            .font(.caption)
                             .foregroundColor(.secondary)
                     }
                 }
 
                 Spacer()
 
-                VStack(alignment: .trailing, spacing: 4) {
+                VStack(alignment: .trailing, spacing: 8) {
                     Label(task.backend.rawValue, systemImage: "gear")
                         .font(.caption)
                         .padding(.horizontal, 8)
@@ -151,11 +145,35 @@ struct TaskDetailView: View {
                         .background(task.backend == .launchd ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
                         .cornerRadius(6)
 
-                    if !task.isExternal {
-                        Text("Created \(task.createdAt, style: .date)")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
+                    if task.backend == .launchd {
+                        HStack(spacing: 6) {
+                            Button {
+                                Task { await viewModel.loadDaemon(task) }
+                            } label: {
+                                Label("Load", systemImage: "arrow.up.circle")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(task.isEnabled || viewModel.isLoading)
+                            .help("Load this task into launchd")
+
+                            Button {
+                                Task { await viewModel.unloadDaemon(task) }
+                            } label: {
+                                Label("Unload", systemImage: "arrow.down.circle")
+                                    .font(.caption)
+                            }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(!task.isEnabled || viewModel.isLoading)
+                            .help("Unload this task from launchd")
+                        }
                     }
+
+                    Text("Created \(task.createdAt, style: .date)")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
                 }
             }
         }
@@ -178,6 +196,7 @@ struct TaskDetailView: View {
                             Label("Edit Script", systemImage: "pencil")
                         }
                         .buttonStyle(.bordered)
+                        .help("Open the script file in the editor")
                     }
                 }
 
@@ -284,6 +303,20 @@ struct TaskDetailView: View {
 
                 if let errPath = task.standardErrorPath, !errPath.isEmpty {
                     InfoRow(label: "Standard Error", value: errPath, monospaced: true)
+                }
+
+                if let dir = task.plistFilePath {
+                    InfoRow(label: "Plist Location", value: dir, monospaced: true)
+                }
+
+                if task.isReadOnly {
+                    HStack {
+                        Image(systemName: "lock.fill")
+                            .foregroundColor(.secondary)
+                        Text("System task (read-only)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
                 }
             }
         }
