@@ -9,6 +9,25 @@ import Foundation
 
 class PlistGenerator {
 
+    /// Environment variable names that must never be set via task configuration
+    /// as they enable code injection or privilege escalation.
+    static let dangerousEnvVars: Set<String> = [
+        "DYLD_INSERT_LIBRARIES",
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FORCE_FLAT_NAMESPACE",
+        "LD_PRELOAD",
+        "LD_LIBRARY_PATH",
+        "BASH_ENV",
+        "ENV",
+        "CDPATH",
+        "GLOBIGNORE",
+        "SHELLOPTS",
+        "BASHOPTS",
+        "PROMPT_COMMAND",
+    ]
+
     func generate(for task: ScheduledTask) -> String {
         var plist = """
         <?xml version="1.0" encoding="UTF-8"?>
@@ -16,7 +35,7 @@ class PlistGenerator {
         <plist version="1.0">
         <dict>
             <key>Label</key>
-            <string>\(task.launchdLabel)</string>
+            <string>\(escapeXML(task.launchdLabel))</string>
 
         """
 
@@ -110,9 +129,12 @@ class PlistGenerator {
             """
         }
 
-        if !task.action.environmentVariables.isEmpty {
+        let safeEnvVars = task.action.environmentVariables.filter { key, _ in
+            !Self.dangerousEnvVars.contains(key.uppercased())
+        }
+        if !safeEnvVars.isEmpty {
             section += "    <key>EnvironmentVariables</key>\n    <dict>\n"
-            for (key, value) in task.action.environmentVariables {
+            for (key, value) in safeEnvVars {
                 section += "        <key>\(escapeXML(key))</key>\n"
                 section += "        <string>\(escapeXML(value))</string>\n"
             }

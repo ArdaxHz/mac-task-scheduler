@@ -82,7 +82,11 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     }
 
     var plistFileName: String {
-        "\(launchdLabel).plist"
+        // Sanitize label to prevent path traversal (e.g. "../" in label)
+        let sanitized = launchdLabel
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "..", with: "_")
+        return "\(sanitized).plist"
     }
 
     /// Generate a deterministic UUID from a launchd label string.

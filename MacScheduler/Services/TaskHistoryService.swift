@@ -26,17 +26,35 @@ actor TaskHistoryService {
         }
     }
 
+    /// Maximum characters to store per output stream in history.
+    private let maxOutputChars = 10_000
+
     func recordExecution(_ result: TaskExecutionResult) async {
-        var taskHistory = history[result.taskId] ?? []
-        taskHistory.insert(result, at: 0)
+        // Truncate large outputs before storing to prevent history.json bloat
+        let truncated = TaskExecutionResult(
+            taskId: result.taskId,
+            startTime: result.startTime,
+            endTime: result.endTime,
+            exitCode: result.exitCode,
+            standardOutput: Self.truncateOutput(result.standardOutput, maxChars: maxOutputChars),
+            standardError: Self.truncateOutput(result.standardError, maxChars: maxOutputChars)
+        )
+
+        var taskHistory = history[truncated.taskId] ?? []
+        taskHistory.insert(truncated, at: 0)
 
         if taskHistory.count > maxHistoryPerTask {
             taskHistory = Array(taskHistory.prefix(maxHistoryPerTask))
         }
 
-        history[result.taskId] = taskHistory
+        history[truncated.taskId] = taskHistory
 
         await saveHistory()
+    }
+
+    private static func truncateOutput(_ output: String, maxChars: Int) -> String {
+        guard output.count > maxChars else { return output }
+        return String(output.prefix(maxChars)) + "\n[... truncated at \(maxChars) chars ...]"
     }
 
     func getHistory(for taskId: UUID) -> [TaskExecutionResult] {

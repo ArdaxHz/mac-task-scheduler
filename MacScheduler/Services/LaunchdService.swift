@@ -179,7 +179,7 @@ class LaunchdService: SchedulerService {
             )
             if directResult.exitCode == 126 {
                 let fullCommand = ([task.action.path] + task.action.arguments)
-                    .map { $0.contains(" ") ? "'\($0)'" : $0 }
+                    .map { shellQuote($0) }
                     .joined(separator: " ")
                 result = try await shellExecutor.execute(
                     command: "/bin/sh",
@@ -459,6 +459,12 @@ class LaunchdService: SchedulerService {
         task.standardErrorPath = plist["StandardErrorPath"] as? String
 
         return task
+    }
+
+    /// Shell-quote a string by wrapping in single quotes and escaping embedded single quotes.
+    private func shellQuote(_ string: String) -> String {
+        if string.isEmpty { return "''" }
+        return "'" + string.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private func formatLabelAsName(_ label: String) -> String {

@@ -194,6 +194,29 @@ class TaskEditorViewModel: ObservableObject {
         }
     }
 
+    /// Check if a path is safe to write script content back to.
+    /// Prevents overwriting system files, dotfiles, or non-script files.
+    static func isSafeScriptWritePath(_ path: String) -> Bool {
+        let expandedPath = NSString(string: path).expandingTildeInPath
+
+        // Must be an existing file (don't create new files in arbitrary locations)
+        guard FileManager.default.fileExists(atPath: expandedPath) else { return false }
+
+        // Block writing to system directories
+        let blockedPrefixes = ["/System", "/usr", "/bin", "/sbin", "/Library", "/private/var", "/etc"]
+        for prefix in blockedPrefixes {
+            if expandedPath.hasPrefix(prefix) { return false }
+        }
+
+        // Block dotfiles (e.g. .bashrc, .zshrc, .ssh/config)
+        let components = expandedPath.components(separatedBy: "/")
+        for component in components where component.hasPrefix(".") && component != "." && component != ".." {
+            return false
+        }
+
+        return true
+    }
+
     /// Check if a path is inside a macOS TCC-protected directory.
     static func isTCCProtected(_ path: String) -> Bool {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -206,43 +229,142 @@ class TaskEditorViewModel: ObservableObject {
         return protectedDirs.contains { expandedPath.hasPrefix($0) }
     }
 
+    /// Characters allowed in launchd labels (reverse DNS convention).
+    private static let labelAllowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_"))
+
     func validate() -> Bool {
         validationErrors = []
 
-        if name.trimmingCharacters(in: .whitespaces).isEmpty {
+        // --- Name ---
+        let trimmedName = name.trimmingCharacters(in: .whitespaces)
+        if trimmedName.isEmpty {
             validationErrors.append("Task name is required")
+        } else if trimmedName.count > 255 {
+            validationErrors.append("Task name is too long (max 255 characters)")
         }
 
-        if taskLabel.trimmingCharacters(in: .whitespaces).isEmpty {
+        // --- Label ---
+        let trimmedLabel = taskLabel.trimmingCharacters(in: .whitespaces)
+        if trimmedLabel.isEmpty {
             validationErrors.append("Task label is required")
+        } else if trimmedLabel.contains("/") || trimmedLabel.contains("..") {
+            validationErrors.append("Task label must not contain '/' or '..'")
+        } else if trimmedLabel.rangeOfCharacter(from: Self.labelAllowedCharacters.inverted) != nil {
+            validationErrors.append("Task label may only contain letters, numbers, '.', '-', and '_'")
+        } else if trimmedLabel.count > 255 {
+            validationErrors.append("Task label is too long (max 255 characters)")
         }
 
+        // --- Executable path ---
         switch actionType {
         case .executable:
             if executablePath.isEmpty {
                 validationErrors.append("Executable path is required")
+            } else {
+                validatePath(executablePath, label: "Executable path")
             }
         case .shellScript:
             if executablePath.isEmpty && scriptContent.isEmpty {
                 validationErrors.append("Script path or content is required")
+            } else if !executablePath.isEmpty {
+                validatePath(executablePath, label: "Script path")
             }
         case .appleScript:
             if executablePath.isEmpty && scriptContent.isEmpty {
                 validationErrors.append("AppleScript path or content is required")
+            } else if !executablePath.isEmpty {
+                validatePath(executablePath, label: "AppleScript path")
             }
         }
 
+        // --- Working directory ---
+        if !workingDirectory.isEmpty {
+            validatePath(workingDirectory, label: "Working directory", mustBeDirectory: true)
+        }
 
+        // --- stdout/stderr paths ---
+        if !standardOutPath.isEmpty {
+            validateOutputPath(standardOutPath, label: "Standard output path")
+        }
+        if !standardErrorPath.isEmpty {
+            validateOutputPath(standardErrorPath, label: "Standard error path")
+        }
+
+        // --- Trigger ---
         if backend == .cron && !triggerType.supportsCron {
             validationErrors.append("'\(triggerType.rawValue)' trigger is not supported by cron")
         }
 
-        if triggerType == .interval && intervalValue <= 0 {
-            validationErrors.append("Interval must be greater than 0")
+        if triggerType == .interval {
+            if intervalValue <= 0 {
+                validationErrors.append("Interval must be greater than 0")
+            } else if intervalValue * intervalUnit.multiplier > 31_536_000 {
+                validationErrors.append("Interval must not exceed 1 year")
+            }
+        }
+
+        // --- Calendar schedule bounds ---
+        if triggerType == .calendar {
+            if scheduleMinute < 0 || scheduleMinute > 59 {
+                validationErrors.append("Minute must be between 0 and 59")
+            }
+            if scheduleHour < 0 || scheduleHour > 23 {
+                validationErrors.append("Hour must be between 0 and 23")
+            }
+            if let day = scheduleDay, (day < 1 || day > 31) {
+                validationErrors.append("Day must be between 1 and 31")
+            }
+            if let weekday = scheduleWeekday, (weekday < 0 || weekday > 6) {
+                validationErrors.append("Weekday must be between 0 (Sun) and 6 (Sat)")
+            }
+            if let month = scheduleMonth, (month < 1 || month > 12) {
+                validationErrors.append("Month must be between 1 and 12")
+            }
         }
 
         showValidationErrors = !validationErrors.isEmpty
         return validationErrors.isEmpty
+    }
+
+    /// Validate a file/directory path for safety.
+    private func validatePath(_ path: String, label: String, mustBeDirectory: Bool = false) {
+        let expanded = NSString(string: path).expandingTildeInPath
+
+        // Reject null bytes (path traversal via null byte injection)
+        if expanded.contains("\0") {
+            validationErrors.append("\(label) contains invalid characters")
+            return
+        }
+
+        // Must be an absolute path
+        if !expanded.hasPrefix("/") {
+            validationErrors.append("\(label) must be an absolute path")
+            return
+        }
+
+        // Reject paths in system-critical directories for writing
+        let systemDirs = ["/System", "/usr/bin", "/usr/sbin", "/sbin", "/bin"]
+        for dir in systemDirs {
+            if expanded.hasPrefix(dir + "/") || expanded == dir {
+                validationErrors.append("\(label) must not point to a system directory")
+                return
+            }
+        }
+    }
+
+    /// Validate an output path (stdout/stderr) for safety.
+    private func validateOutputPath(_ path: String, label: String) {
+        let expanded = NSString(string: path).expandingTildeInPath
+
+        if expanded.contains("\0") {
+            validationErrors.append("\(label) contains invalid characters")
+            return
+        }
+
+        if !expanded.hasPrefix("/") {
+            validationErrors.append("\(label) must be an absolute path")
+            return
+        }
     }
 
     /// Scripts directory from user preferences, falling back to ~/Library/Scripts.
@@ -306,27 +428,52 @@ class TaskEditorViewModel: ObservableObject {
         return nil
     }
 
+    /// Strip null bytes and other dangerous control characters from a string.
+    /// Preserves newlines and tabs which are valid in script content.
+    private static func sanitizeInput(_ string: String) -> String {
+        string.filter { char in
+            guard let ascii = char.asciiValue else { return true } // Allow non-ASCII (unicode)
+            // Allow printable ASCII (32-126), newline, tab, carriage return
+            return ascii >= 32 || ascii == 10 || ascii == 9 || ascii == 13
+        }
+    }
+
+    /// Strip null bytes from paths (newlines are not valid in paths).
+    private static func sanitizePath(_ string: String) -> String {
+        string.filter { $0 != "\0" }
+    }
+
     func buildTask() -> ScheduledTask {
+        // Sanitize all user inputs before building the task
+        let cleanPath = Self.sanitizePath(executablePath)
+        let cleanWorkDir = Self.sanitizePath(workingDirectory)
+        let cleanLabel = Self.sanitizeInput(taskLabel).trimmingCharacters(in: .whitespaces)
+        let cleanName = Self.sanitizeInput(name).trimmingCharacters(in: .whitespaces)
+        let cleanDescription = Self.sanitizeInput(taskDescription)
+        let cleanStdOut = Self.sanitizePath(standardOutPath)
+        let cleanStdErr = Self.sanitizePath(standardErrorPath)
+
         // For file-based scripts, write edited content back to the file
         // and don't embed it inline in the plist
         var inlineScript: String? = nil
         if (actionType == .shellScript || actionType == .appleScript) && !scriptContent.isEmpty {
-            if !executablePath.isEmpty {
+            if !cleanPath.isEmpty && Self.isSafeScriptWritePath(cleanPath) {
                 // File-based script: save content back to the file
-                try? scriptContent.write(toFile: executablePath, atomically: true, encoding: .utf8)
-                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executablePath)
-            } else {
+                try? scriptContent.write(toFile: cleanPath, atomically: true, encoding: .utf8)
+                try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cleanPath)
+            } else if cleanPath.isEmpty {
                 // No file path: use as inline script content
                 inlineScript = scriptContent
             }
+            // If executablePath is set but not safe to write, reference the file without modifying it
         }
 
         let action = TaskAction(
             id: editingTask?.action.id ?? UUID(),
             type: actionType,
-            path: executablePath,
+            path: cleanPath,
             arguments: arguments.isEmpty ? [] : arguments.components(separatedBy: " "),
-            workingDirectory: workingDirectory.isEmpty ? nil : workingDirectory,
+            workingDirectory: cleanWorkDir.isEmpty ? nil : cleanWorkDir,
             environmentVariables: [:],
             scriptContent: inlineScript
         )
@@ -360,9 +507,9 @@ class TaskEditorViewModel: ObservableObject {
         }
 
         return ScheduledTask(
-            id: editingTask?.id ?? ScheduledTask.uuidFromLabel(taskLabel),
-            name: name.trimmingCharacters(in: .whitespaces),
-            description: taskDescription,
+            id: editingTask?.id ?? ScheduledTask.uuidFromLabel(cleanLabel),
+            name: cleanName,
+            description: cleanDescription,
             backend: backend,
             action: action,
             trigger: trigger,
@@ -371,9 +518,9 @@ class TaskEditorViewModel: ObservableObject {
             modifiedAt: Date(),
             runAtLoad: runAtLoad,
             keepAlive: keepAlive,
-            standardOutPath: standardOutPath.isEmpty ? nil : standardOutPath,
-            standardErrorPath: standardErrorPath.isEmpty ? nil : standardErrorPath,
-            launchdLabel: taskLabel,
+            standardOutPath: cleanStdOut.isEmpty ? nil : cleanStdOut,
+            standardErrorPath: cleanStdErr.isEmpty ? nil : cleanStdErr,
+            launchdLabel: cleanLabel,
             isReadOnly: editingTask?.isReadOnly ?? false,
             plistFilePath: editingTask?.plistFilePath
         )

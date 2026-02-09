@@ -200,6 +200,8 @@ class CronService: SchedulerService {
         let tempFile = tempDir.appendingPathComponent(UUID().uuidString + ".crontab")
 
         try crontabContent.write(to: tempFile, atomically: true, encoding: .utf8)
+        // Restrict permissions to owner-only to prevent other processes from reading/modifying
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempFile.path)
         defer {
             try? FileManager.default.removeItem(at: tempFile)
         }
@@ -236,6 +238,18 @@ class CronService: SchedulerService {
         return result
     }
 
+    /// Shell-quote a string so it's safe to embed in a cron command line.
+    /// Also strips newlines to prevent crontab line injection.
+    private func shellQuote(_ string: String) -> String {
+        if string.isEmpty { return "''" }
+        // Strip newlines and carriage returns — a newline in a cron line would inject a new cron entry
+        let sanitized = string
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        // Wrap in single quotes, escaping any embedded single quotes
+        return "'" + sanitized.replacingOccurrences(of: "'", with: "'\\''") + "'"
+    }
+
     private func generateCronLine(for task: ScheduledTask) -> String {
         guard let schedule = task.trigger.calendarSchedule else {
             return ""
@@ -247,21 +261,22 @@ class CronService: SchedulerService {
         switch task.action.type {
         case .executable:
             if task.action.arguments.isEmpty {
-                command = task.action.path
+                command = shellQuote(task.action.path)
             } else {
-                command = "\(task.action.path) \(task.action.arguments.joined(separator: " "))"
+                let quotedArgs = task.action.arguments.map { shellQuote($0) }.joined(separator: " ")
+                command = "\(shellQuote(task.action.path)) \(quotedArgs)"
             }
         case .shellScript:
             if let script = task.action.scriptContent, !script.isEmpty {
-                command = "/bin/bash -c '\(script.replacingOccurrences(of: "'", with: "'\\''"))'"
+                command = "/bin/bash -c \(shellQuote(script))"
             } else {
-                command = "/bin/bash \(task.action.path)"
+                command = "/bin/bash \(shellQuote(task.action.path))"
             }
         case .appleScript:
             if let script = task.action.scriptContent, !script.isEmpty {
-                command = "/usr/bin/osascript -e '\(script.replacingOccurrences(of: "'", with: "'\\''"))'"
+                command = "/usr/bin/osascript -e \(shellQuote(script))"
             } else {
-                command = "/usr/bin/osascript \(task.action.path)"
+                command = "/usr/bin/osascript \(shellQuote(task.action.path))"
             }
         }
 

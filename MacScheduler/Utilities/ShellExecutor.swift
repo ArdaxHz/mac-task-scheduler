@@ -16,6 +16,9 @@ struct ShellResult {
 actor ShellExecutor {
     static let shared = ShellExecutor()
 
+    /// Maximum bytes to capture per stream (stdout/stderr) to prevent memory exhaustion.
+    private static let maxOutputBytes = 1_048_576 // 1 MB
+
     private init() {}
 
     func execute(
@@ -25,11 +28,6 @@ actor ShellExecutor {
         environment: [String: String]? = nil,
         timeout: TimeInterval = 60.0
     ) async throws -> ShellResult {
-        let fm = FileManager.default
-        if fm.fileExists(atPath: command) && !fm.isExecutableFile(atPath: command) {
-            try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: command)
-        }
-
         let process = Process()
         let outputPipe = Pipe()
         let errorPipe = Pipe()
@@ -46,7 +44,10 @@ actor ShellExecutor {
         if let env = environment {
             var processEnv = ProcessInfo.processInfo.environment
             for (key, value) in env {
-                processEnv[key] = value
+                // Block dangerous environment variables that enable code injection
+                if !PlistGenerator.dangerousEnvVars.contains(key.uppercased()) {
+                    processEnv[key] = value
+                }
             }
             process.environment = processEnv
         }
@@ -57,7 +58,24 @@ actor ShellExecutor {
             throw SchedulerError.commandExecutionFailed("Failed to start process: \(error.localizedDescription)")
         }
 
-        let timeoutTask = Task {
+        // Read pipes concurrently BEFORE waitUntilExit to avoid deadlock.
+        // If the process writes more than the pipe buffer (~64KB) and we only
+        // read after exit, both sides block forever.
+        let maxBytes = Self.maxOutputBytes
+        let outputData: Data
+        let errorData: Data
+        do {
+            async let stdoutData = Self.readPipeBounded(outputPipe, maxBytes: maxBytes)
+            async let stderrData = Self.readPipeBounded(errorPipe, maxBytes: maxBytes)
+            outputData = try await stdoutData
+            errorData = try await stderrData
+        } catch {
+            process.terminate()
+            throw SchedulerError.commandExecutionFailed("Failed reading process output: \(error.localizedDescription)")
+        }
+
+        // Now safe to wait — pipes have been drained
+        let timeoutTask = Task.detached {
             try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
             if process.isRunning {
                 process.terminate()
@@ -67,9 +85,6 @@ actor ShellExecutor {
         process.waitUntilExit()
         timeoutTask.cancel()
 
-        let outputData = outputPipe.fileHandleForReading.readDataToEndOfFile()
-        let errorData = errorPipe.fileHandleForReading.readDataToEndOfFile()
-
         let output = String(data: outputData, encoding: .utf8) ?? ""
         let error = String(data: errorData, encoding: .utf8) ?? ""
 
@@ -78,6 +93,40 @@ actor ShellExecutor {
             standardOutput: output.trimmingCharacters(in: .whitespacesAndNewlines),
             standardError: error.trimmingCharacters(in: .whitespacesAndNewlines)
         )
+    }
+
+    /// Read from a pipe with a bounded size limit to prevent memory exhaustion.
+    private static func readPipeBounded(_ pipe: Pipe, maxBytes: Int) async throws -> Data {
+        let handle = pipe.fileHandleForReading
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                var accumulated = Data()
+                var hitLimit = false
+
+                while true {
+                    let chunk = handle.availableData
+                    if chunk.isEmpty { break } // EOF
+
+                    if !hitLimit {
+                        let remaining = maxBytes - accumulated.count
+                        if remaining > 0 {
+                            accumulated.append(chunk.prefix(remaining))
+                        }
+                        if accumulated.count >= maxBytes {
+                            hitLimit = true
+                        }
+                    }
+                    // Continue reading even after limit to drain the pipe and unblock the process
+                }
+
+                if hitLimit {
+                    let notice = "\n[... output truncated at \(maxBytes / 1024)KB ...]".data(using: .utf8) ?? Data()
+                    accumulated.append(notice)
+                }
+
+                continuation.resume(returning: accumulated)
+            }
+        }
     }
 
     func executeScript(
@@ -95,8 +144,9 @@ actor ShellExecutor {
             try? FileManager.default.removeItem(at: scriptURL)
         }
 
+        // Use 0o700 (owner-only) instead of 0o755 to prevent other users from reading/modifying
         try FileManager.default.setAttributes(
-            [.posixPermissions: 0o755],
+            [.posixPermissions: 0o700],
             ofItemAtPath: scriptURL.path
         )
 
