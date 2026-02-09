@@ -29,229 +29,168 @@ class PlistGenerator {
     ]
 
     func generate(for task: ScheduledTask) -> String {
-        var plist = """
+        // Use array of parts + joined for O(n) instead of O(n²) string concatenation
+        var parts: [String] = []
+        parts.reserveCapacity(32)
+
+        parts.append("""
         <?xml version="1.0" encoding="UTF-8"?>
         <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
         <plist version="1.0">
         <dict>
             <key>Label</key>
             <string>\(escapeXML(task.launchdLabel))</string>
+        """)
 
-        """
+        appendProgramSection(for: task, to: &parts)
+        appendTriggerSection(for: task, to: &parts)
+        appendOptionsSection(for: task, to: &parts)
+        appendMetadataSection(for: task, to: &parts)
 
-        plist += generateProgramSection(for: task)
-        plist += generateTriggerSection(for: task)
-        plist += generateOptionsSection(for: task)
-        plist += generateMetadataSection(for: task)
-
-        plist += """
+        parts.append("""
         </dict>
         </plist>
-        """
+        """)
 
-        return plist
+        return parts.joined(separator: "\n")
     }
 
-    private func generateProgramSection(for task: ScheduledTask) -> String {
-        var section = ""
-
+    private func appendProgramSection(for task: ScheduledTask, to parts: inout [String]) {
         switch task.action.type {
         case .executable:
             if task.action.arguments.isEmpty {
-                section += """
-                    <key>Program</key>
-                    <string>\(escapeXML(task.action.path))</string>
-
-                """
+                parts.append("    <key>Program</key>")
+                parts.append("    <string>\(escapeXML(task.action.path))</string>")
             } else {
-                section += """
-                    <key>ProgramArguments</key>
-                    <array>
-                        <string>\(escapeXML(task.action.path))</string>
-
-                """
+                parts.append("    <key>ProgramArguments</key>")
+                parts.append("    <array>")
+                parts.append("        <string>\(escapeXML(task.action.path))</string>")
                 for arg in task.action.arguments {
-                    section += "        <string>\(escapeXML(arg))</string>\n"
+                    parts.append("        <string>\(escapeXML(arg))</string>")
                 }
-                section += "    </array>\n"
+                parts.append("    </array>")
             }
 
         case .shellScript:
+            parts.append("    <key>ProgramArguments</key>")
+            parts.append("    <array>")
+            parts.append("        <string>/bin/bash</string>")
             if let script = task.action.scriptContent, !script.isEmpty {
-                section += """
-                    <key>ProgramArguments</key>
-                    <array>
-                        <string>/bin/bash</string>
-                        <string>-c</string>
-                        <string>\(escapeXML(script))</string>
-                    </array>
-
-                """
+                parts.append("        <string>-c</string>")
+                parts.append("        <string>\(escapeXML(script))</string>")
             } else {
-                section += """
-                    <key>ProgramArguments</key>
-                    <array>
-                        <string>/bin/bash</string>
-                        <string>\(escapeXML(task.action.path))</string>
-                    </array>
-
-                """
+                parts.append("        <string>\(escapeXML(task.action.path))</string>")
             }
+            parts.append("    </array>")
 
         case .appleScript:
+            parts.append("    <key>ProgramArguments</key>")
+            parts.append("    <array>")
+            parts.append("        <string>/usr/bin/osascript</string>")
             if let script = task.action.scriptContent, !script.isEmpty {
-                section += """
-                    <key>ProgramArguments</key>
-                    <array>
-                        <string>/usr/bin/osascript</string>
-                        <string>-e</string>
-                        <string>\(escapeXML(script))</string>
-                    </array>
-
-                """
+                parts.append("        <string>-e</string>")
+                parts.append("        <string>\(escapeXML(script))</string>")
             } else {
-                section += """
-                    <key>ProgramArguments</key>
-                    <array>
-                        <string>/usr/bin/osascript</string>
-                        <string>\(escapeXML(task.action.path))</string>
-                    </array>
-
-                """
+                parts.append("        <string>\(escapeXML(task.action.path))</string>")
             }
+            parts.append("    </array>")
         }
 
         if let workDir = task.action.workingDirectory, !workDir.isEmpty {
-            section += """
-                <key>WorkingDirectory</key>
-                <string>\(escapeXML(workDir))</string>
-
-            """
+            parts.append("    <key>WorkingDirectory</key>")
+            parts.append("    <string>\(escapeXML(workDir))</string>")
         }
 
         let safeEnvVars = task.action.environmentVariables.filter { key, _ in
             !Self.dangerousEnvVars.contains(key.uppercased())
         }
         if !safeEnvVars.isEmpty {
-            section += "    <key>EnvironmentVariables</key>\n    <dict>\n"
+            parts.append("    <key>EnvironmentVariables</key>")
+            parts.append("    <dict>")
             for (key, value) in safeEnvVars {
-                section += "        <key>\(escapeXML(key))</key>\n"
-                section += "        <string>\(escapeXML(value))</string>\n"
+                parts.append("        <key>\(escapeXML(key))</key>")
+                parts.append("        <string>\(escapeXML(value))</string>")
             }
-            section += "    </dict>\n"
+            parts.append("    </dict>")
         }
-
-        return section
     }
 
-    private func generateTriggerSection(for task: ScheduledTask) -> String {
-        var section = ""
-
+    private func appendTriggerSection(for task: ScheduledTask, to parts: inout [String]) {
         switch task.trigger.type {
         case .calendar:
             if let schedule = task.trigger.calendarSchedule {
-                section += "    <key>StartCalendarInterval</key>\n    <dict>\n"
-
+                parts.append("    <key>StartCalendarInterval</key>")
+                parts.append("    <dict>")
                 if let month = schedule.month {
-                    section += "        <key>Month</key>\n        <integer>\(month)</integer>\n"
+                    parts.append("        <key>Month</key>")
+                    parts.append("        <integer>\(month)</integer>")
                 }
                 if let day = schedule.day {
-                    section += "        <key>Day</key>\n        <integer>\(day)</integer>\n"
+                    parts.append("        <key>Day</key>")
+                    parts.append("        <integer>\(day)</integer>")
                 }
                 if let weekday = schedule.weekday {
-                    section += "        <key>Weekday</key>\n        <integer>\(weekday)</integer>\n"
+                    parts.append("        <key>Weekday</key>")
+                    parts.append("        <integer>\(weekday)</integer>")
                 }
                 if let hour = schedule.hour {
-                    section += "        <key>Hour</key>\n        <integer>\(hour)</integer>\n"
+                    parts.append("        <key>Hour</key>")
+                    parts.append("        <integer>\(hour)</integer>")
                 }
                 if let minute = schedule.minute {
-                    section += "        <key>Minute</key>\n        <integer>\(minute)</integer>\n"
+                    parts.append("        <key>Minute</key>")
+                    parts.append("        <integer>\(minute)</integer>")
                 }
-
-                section += "    </dict>\n"
+                parts.append("    </dict>")
             }
 
         case .interval:
             if let seconds = task.trigger.intervalSeconds {
-                section += """
-                    <key>StartInterval</key>
-                    <integer>\(seconds)</integer>
-
-                """
+                parts.append("    <key>StartInterval</key>")
+                parts.append("    <integer>\(seconds)</integer>")
             }
 
         case .atLogin, .atStartup:
-            section += """
-                <key>RunAtLoad</key>
-                <true/>
-
-            """
+            parts.append("    <key>RunAtLoad</key>")
+            parts.append("    <true/>")
 
         case .onDemand:
             break
         }
-
-        return section
     }
 
-    private func generateOptionsSection(for task: ScheduledTask) -> String {
-        var section = ""
-
+    private func appendOptionsSection(for task: ScheduledTask, to parts: inout [String]) {
         if task.runAtLoad && task.trigger.type != .atLogin && task.trigger.type != .atStartup {
-            section += """
-                <key>RunAtLoad</key>
-                <true/>
-
-            """
+            parts.append("    <key>RunAtLoad</key>")
+            parts.append("    <true/>")
         }
 
         if task.keepAlive {
-            section += """
-                <key>KeepAlive</key>
-                <true/>
-
-            """
+            parts.append("    <key>KeepAlive</key>")
+            parts.append("    <true/>")
         }
 
         if let outPath = task.standardOutPath, !outPath.isEmpty {
-            section += """
-                <key>StandardOutPath</key>
-                <string>\(escapeXML(outPath))</string>
-
-            """
+            parts.append("    <key>StandardOutPath</key>")
+            parts.append("    <string>\(escapeXML(outPath))</string>")
         }
 
         if let errPath = task.standardErrorPath, !errPath.isEmpty {
-            section += """
-                <key>StandardErrorPath</key>
-                <string>\(escapeXML(errPath))</string>
-
-            """
+            parts.append("    <key>StandardErrorPath</key>")
+            parts.append("    <string>\(escapeXML(errPath))</string>")
         }
-
-        return section
     }
 
-    private func generateMetadataSection(for task: ScheduledTask) -> String {
-        var section = ""
-
+    private func appendMetadataSection(for task: ScheduledTask, to parts: inout [String]) {
         if !task.name.isEmpty {
-            section += """
-                <key>MacSchedulerName</key>
-                <string>\(escapeXML(task.name))</string>
-
-            """
+            parts.append("    <key>MacSchedulerName</key>")
+            parts.append("    <string>\(escapeXML(task.name))</string>")
         }
 
         if !task.description.isEmpty {
-            section += """
-                <key>MacSchedulerDescription</key>
-                <string>\(escapeXML(task.description))</string>
-
-            """
+            parts.append("    <key>MacSchedulerDescription</key>")
+            parts.append("    <string>\(escapeXML(task.description))</string>")
         }
-
-        return section
     }
 
     private func escapeXML(_ string: String) -> String {

@@ -62,13 +62,15 @@ class TaskListViewModel: ObservableObject {
         return result
     }
 
-    var enabledTaskCount: Int {
-        tasks.filter { $0.status.state == .enabled }.count
+    /// Pre-computed status counts — avoids re-filtering tasks per TaskState on every render.
+    var statusCounts: [TaskState: Int] {
+        var counts: [TaskState: Int] = [:]
+        for task in tasks {
+            counts[task.status.state, default: 0] += 1
+        }
+        return counts
     }
 
-    var disabledTaskCount: Int {
-        tasks.filter { $0.status.state == .disabled }.count
-    }
 
     init() {
         Task {
@@ -85,14 +87,16 @@ class TaskListViewModel: ObservableObject {
             let launchdService = LaunchdService.shared
             let cronService = CronService.shared
 
-            let launchdTasks = try await launchdService.discoverTasks()
-            let cronTasks = try await cronService.discoverTasks()
+            // Fetch launchd + cron tasks in parallel
+            async let launchdResult = launchdService.discoverTasks()
+            async let cronResult = cronService.discoverTasks()
+            let (launchdTasks, cronTasks) = try await (launchdResult, cronResult)
 
             // Dedup by task ID (deterministic UUID from label) — prefer user-writable over read-only
             var tasksById: [UUID: ScheduledTask] = [:]
+            tasksById.reserveCapacity(launchdTasks.count + cronTasks.count)
             for task in launchdTasks {
                 if let existing = tasksById[task.id] {
-                    // Prefer user-writable over read-only
                     if !task.isReadOnly && existing.isReadOnly {
                         tasksById[task.id] = task
                     }
@@ -108,16 +112,38 @@ class TaskListViewModel: ObservableObject {
 
             var allTasks = Array(tasksById.values)
 
-            // Enrich with native launchd info (only for loaded tasks)
-            let loadedLabels = await launchdService.getAllLoadedLabels()
-            for i in allTasks.indices where allTasks[i].backend == .launchd {
-                // stdout/stderr file mtime
+            // Collect loaded launchd task indices for parallel info fetching
+            // Note: discoverTasks() already calls getAllLoadedLabels() internally
+            // and sets status.state, so we can check isEnabled instead of re-fetching.
+            let launchdIndices = allTasks.indices.filter { allTasks[$0].backend == .launchd }
+
+            // Enrich launchd tasks: file mtimes (cheap, synchronous)
+            for i in launchdIndices {
                 if let lastRun = launchdService.getLastRunTime(for: allTasks[i]) {
                     allTasks[i].status.lastRun = lastRun
                 }
-                // launchctl print info (only for loaded tasks — skip unloaded to avoid errors)
-                if loadedLabels.contains(allTasks[i].launchdLabel) {
-                    if let info = await launchdService.getLaunchdInfo(for: allTasks[i]) {
+            }
+
+            // Fetch launchctl print info in parallel for loaded tasks only
+            let loadedIndices = launchdIndices.filter { allTasks[$0].isEnabled }
+            if !loadedIndices.isEmpty {
+                let infos: [(Int, (runs: Int, lastExitCode: Int32)?)] = await withTaskGroup(of: (Int, (runs: Int, lastExitCode: Int32)?).self) { group in
+                    for i in loadedIndices {
+                        let task = allTasks[i]
+                        group.addTask {
+                            let info = await launchdService.getLaunchdInfo(for: task)
+                            return (i, info)
+                        }
+                    }
+                    var results: [(Int, (runs: Int, lastExitCode: Int32)?)] = []
+                    results.reserveCapacity(loadedIndices.count)
+                    for await result in group {
+                        results.append(result)
+                    }
+                    return results
+                }
+                for (i, info) in infos {
+                    if let info = info {
                         allTasks[i].status.runCount = info.runs
                     }
                 }
@@ -127,14 +153,12 @@ class TaskListViewModel: ObservableObject {
             for i in allTasks.indices {
                 let taskHistory = await historyService.getHistory(for: allTasks[i].id)
                 if let latestRun = taskHistory.first {
-                    // Use app history if no native last run, or if app history is more recent
                     if allTasks[i].status.lastRun == nil || latestRun.endTime > (allTasks[i].status.lastRun ?? .distantPast) {
                         allTasks[i].status.lastRun = latestRun.endTime
                     }
                     if allTasks[i].status.lastResult == nil {
                         allTasks[i].status.lastResult = latestRun
                     }
-                    // Use history run count if native count is 0
                     if allTasks[i].status.runCount == 0 {
                         allTasks[i].status.runCount = taskHistory.count
                     }

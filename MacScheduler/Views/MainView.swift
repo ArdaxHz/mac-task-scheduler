@@ -37,24 +37,68 @@ struct MainView: View {
     }
 
     @AppStorage("autoCheckUpdates") private var autoCheckUpdates = true
-    @State private var showInspector = true
+    @State private var showDetailPanel = true
+    @State private var detailPanelWidth: CGFloat = 350
+    @State private var dragStartWidth: CGFloat?
+    @State private var dragPreviewWidth: CGFloat?
     @State private var showUpdateAlert = false
     @State private var availableUpdate: UpdateService.Release?
+
+    private let minDetailWidth: CGFloat = 280
+    private let maxDetailWidth: CGFloat = 600
+    private let collapseThreshold: CGFloat = 240
 
     var body: some View {
         NavigationSplitView {
             sidebar
         } detail: {
-            contentView
+            HStack(spacing: 0) {
+                contentView
+                    .frame(maxWidth: .infinity)
+                if showDetailPanel && viewModel.selectedTask != nil {
+                    resizableDivider
+                    detailView
+                        .frame(width: detailPanelWidth)
+                        .clipped()
+                }
+            }
+            .overlay(alignment: .trailing) {
+                if let previewWidth = dragPreviewWidth {
+                    Rectangle()
+                        .fill(Color.accentColor.opacity(0.5))
+                        .frame(width: 2)
+                        .offset(x: -(previewWidth - 1))
+                        .allowsHitTesting(false)
+                }
+            }
         }
         .toolbar(removing: .sidebarToggle)
-        .inspector(isPresented: $showInspector) {
-            detailView
-                .inspectorColumnWidth(min: 200, ideal: 350, max: 500)
-        }
         .onChange(of: viewModel.selectedTask) { _, newTask in
-            if newTask != nil && !showInspector {
-                showInspector = true
+            if newTask != nil && !showDetailPanel {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showDetailPanel = true
+                    if detailPanelWidth < minDetailWidth {
+                        detailPanelWidth = 350
+                    }
+                }
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .primaryAction) {
+                Button {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        showDetailPanel.toggle()
+                        if showDetailPanel && detailPanelWidth < minDetailWidth {
+                            detailPanelWidth = 350
+                        }
+                    }
+                } label: {
+                    Label(
+                        showDetailPanel ? "Hide Detail" : "Show Detail",
+                        systemImage: "sidebar.trailing"
+                    )
+                }
+                .help(showDetailPanel ? "Hide task detail panel" : "Show task detail panel")
             }
         }
         .sheet(item: $activeSheet) { sheet in
@@ -111,6 +155,7 @@ struct MainView: View {
             }
 
             Section("Status") {
+                let statusCounts = viewModel.statusCounts
                 ForEach(TaskState.allCases, id: \.self) { state in
                     Button {
                         if viewModel.filterStates.contains(state) {
@@ -126,7 +171,7 @@ struct MainView: View {
                             Label(state.rawValue, systemImage: state.systemImage)
                                 .foregroundColor(statusColor(for: state))
                             Spacer()
-                            Text("\(viewModel.tasks.filter { $0.status.state == state }.count)")
+                            Text("\(statusCounts[state, default: 0])")
                                 .foregroundColor(.secondary)
                         }
                     }
@@ -165,6 +210,50 @@ struct MainView: View {
         case .running: return .blue
         case .error: return .red
         }
+    }
+
+    private var resizableDivider: some View {
+        Rectangle()
+            .fill(Color(.separatorColor))
+            .frame(width: 1)
+            .padding(.horizontal, 3)
+            .frame(width: 7)
+            .contentShape(Rectangle())
+            .onHover { hovering in
+                if hovering {
+                    NSCursor.resizeLeftRight.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .gesture(
+                DragGesture(minimumDistance: 1)
+                    .onChanged { value in
+                        if dragStartWidth == nil {
+                            dragStartWidth = detailPanelWidth
+                        }
+                        let startWidth = dragStartWidth ?? detailPanelWidth
+                        let newWidth = startWidth - value.translation.width
+
+                        if newWidth < collapseThreshold {
+                            dragPreviewWidth = nil
+                            NSCursor.pop()
+                            withAnimation(.easeOut(duration: 0.15)) {
+                                showDetailPanel = false
+                            }
+                            dragStartWidth = nil
+                        } else {
+                            dragPreviewWidth = max(minDetailWidth, min(maxDetailWidth, newWidth))
+                        }
+                    }
+                    .onEnded { value in
+                        if let finalWidth = dragPreviewWidth {
+                            detailPanelWidth = finalWidth
+                        }
+                        dragPreviewWidth = nil
+                        dragStartWidth = nil
+                    }
+            )
     }
 
     @ViewBuilder

@@ -10,11 +10,15 @@ import SwiftUI
 @main
 struct MacSchedulerApp: App {
     @StateObject private var taskListViewModel = TaskListViewModel()
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some Scene {
         WindowGroup {
             MainView()
                 .environmentObject(taskListViewModel)
+                .onReceive(NotificationCenter.default.publisher(for: NSApplication.willTerminateNotification)) { _ in
+                    Task { await TaskHistoryService.shared.flush() }
+                }
         }
         .commands {
             CommandGroup(replacing: .newItem) {

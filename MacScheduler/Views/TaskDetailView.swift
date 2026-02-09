@@ -51,54 +51,6 @@ struct TaskDetailView: View {
                 .padding()
             }
         }
-        .navigationTitle(task.name)
-        .toolbar {
-            ToolbarItemGroup {
-                Button {
-                    Task { await viewModel.refreshTaskStatus(task) }
-                } label: {
-                    Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
-                }
-                .help("Refresh task status")
-                .disabled(viewModel.isLoading)
-
-                Button {
-                    Task { await viewModel.runTaskNow(task) }
-                } label: {
-                    Label("Run Now", systemImage: "play.fill")
-                }
-                .help("Execute this task immediately")
-                .disabled(viewModel.isLoading)
-
-                Button {
-                    Task { await viewModel.toggleTaskEnabled(task) }
-                } label: {
-                    if task.isEnabled {
-                        Label("Disable", systemImage: "pause.fill")
-                    } else {
-                        Label("Enable", systemImage: "checkmark")
-                    }
-                }
-                .help(task.isEnabled ? "Unload task from launchd" : "Load task into launchd")
-                .disabled(viewModel.isLoading)
-
-                Button {
-                    onEdit(task)
-                } label: {
-                    Label("Edit", systemImage: "pencil")
-                }
-                .help("Edit task configuration")
-                .disabled(task.isReadOnly)
-
-                Button(role: .destructive) {
-                    showDeleteConfirmation = true
-                } label: {
-                    Label("Delete", systemImage: "trash")
-                }
-                .help("Delete this task and its plist file")
-                .disabled(task.isReadOnly)
-            }
-        }
         .confirmationDialog("Delete Task", isPresented: $showDeleteConfirmation) {
             Button("Delete", role: .destructive) {
                 Task { await viewModel.deleteTask(task) }
@@ -116,70 +68,132 @@ struct TaskDetailView: View {
 
     private var headerSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Image(systemName: task.status.state.systemImage)
-                    .font(.title)
-                    .foregroundColor(statusColor(for: task.status.state))
+            ViewThatFits(in: .horizontal) {
+                headerRow(compact: false)
+                headerRow(compact: true)
+            }
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Text(task.status.state.rawValue)
-                        .font(.headline)
-                    Text(task.launchdLabel)
-                        .font(.system(.caption, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .textSelection(.enabled)
-                    if !task.description.isEmpty {
-                        Text(task.description)
-                            .font(.subheadline)
-                            .foregroundColor(.secondary)
-                    }
-                }
+            Divider()
 
-                Spacer()
-
-                VStack(alignment: .trailing, spacing: 8) {
-                    Label(task.backend.rawValue, systemImage: "gear")
-                        .font(.caption)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(task.backend == .launchd ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
-                        .cornerRadius(6)
-
-                    if task.backend == .launchd {
-                        HStack(spacing: 6) {
-                            Button {
-                                Task { await viewModel.loadDaemon(task) }
-                            } label: {
-                                Label("Load", systemImage: "arrow.up.circle")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(task.isEnabled || viewModel.isLoading)
-                            .help("Load this task into launchd")
-
-                            Button {
-                                Task { await viewModel.unloadDaemon(task) }
-                            } label: {
-                                Label("Unload", systemImage: "arrow.down.circle")
-                                    .font(.caption)
-                            }
-                            .buttonStyle(.bordered)
-                            .controlSize(.small)
-                            .disabled(!task.isEnabled || viewModel.isLoading)
-                            .help("Unload this task from launchd")
-                        }
-                    }
-
-                    Text("Created \(task.createdAt, style: .date)")
-                        .font(.caption)
-                        .foregroundColor(.secondary)
-                }
+            ViewThatFits(in: .horizontal) {
+                actionButtons(iconOnly: false)
+                actionButtons(iconOnly: true)
             }
         }
         .padding()
         .background(Color(.textBackgroundColor))
         .cornerRadius(12)
+    }
+
+    @ViewBuilder
+    private func headerRow(compact: Bool) -> some View {
+        HStack {
+            Image(systemName: task.status.state.systemImage)
+                .font(.title)
+                .foregroundColor(statusColor(for: task.status.state))
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text(task.status.state.rawValue)
+                    .font(.headline)
+                Text(task.launchdLabel)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
+                if !task.description.isEmpty {
+                    Text(task.description)
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+            }
+
+            Spacer()
+
+            if compact {
+                headerRightCompact
+            } else {
+                headerRightFull
+            }
+        }
+    }
+
+    private var headerRightFull: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Label(task.backend.rawValue, systemImage: "gear")
+                .font(.caption)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 4)
+                .background(task.backend == .launchd ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
+                .cornerRadius(6)
+
+            if task.backend == .launchd {
+                HStack(spacing: 6) {
+                    Button {
+                        Task { await viewModel.loadDaemon(task) }
+                    } label: {
+                        Label("Load", systemImage: "arrow.up.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(task.isEnabled || viewModel.isLoading)
+                    .help("Load this task into launchd")
+
+                    Button {
+                        Task { await viewModel.unloadDaemon(task) }
+                    } label: {
+                        Label("Unload", systemImage: "arrow.down.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!task.isEnabled || viewModel.isLoading)
+                    .help("Unload this task from launchd")
+                }
+            }
+
+            Text("Created \(task.createdAt, style: .date)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+    }
+
+    private var headerRightCompact: some View {
+        VStack(alignment: .trailing, spacing: 8) {
+            Image(systemName: "gear")
+                .font(.caption)
+                .padding(6)
+                .background(task.backend == .launchd ? Color.blue.opacity(0.2) : Color.orange.opacity(0.2))
+                .cornerRadius(6)
+                .help(task.backend.rawValue)
+
+            if task.backend == .launchd {
+                HStack(spacing: 6) {
+                    Button {
+                        Task { await viewModel.loadDaemon(task) }
+                    } label: {
+                        Image(systemName: "arrow.up.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(task.isEnabled || viewModel.isLoading)
+                    .help("Load this task into launchd")
+
+                    Button {
+                        Task { await viewModel.unloadDaemon(task) }
+                    } label: {
+                        Image(systemName: "arrow.down.circle")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .disabled(!task.isEnabled || viewModel.isLoading)
+                    .help("Unload this task from launchd")
+                }
+            }
+        }
     }
 
     private var actionSection: some View {
@@ -425,6 +439,79 @@ struct TaskDetailView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func actionButtons(iconOnly: Bool) -> some View {
+        if iconOnly {
+            actionButtonsContent
+                .labelStyle(.iconOnly)
+        } else {
+            actionButtonsContent
+                .labelStyle(.titleAndIcon)
+        }
+    }
+
+    private var actionButtonsContent: some View {
+        HStack(spacing: 8) {
+            Button {
+                Task { await viewModel.runTaskNow(task) }
+            } label: {
+                Label("Run Now", systemImage: "play.fill")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(viewModel.isLoading)
+            .help("Execute this task immediately")
+
+            Button {
+                Task { await viewModel.toggleTaskEnabled(task) }
+            } label: {
+                Label(task.isEnabled ? "Disable" : "Enable",
+                      systemImage: task.isEnabled ? "pause.fill" : "checkmark")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(viewModel.isLoading)
+            .help(task.isEnabled ? "Unload task from launchd" : "Load task into launchd")
+
+            Button {
+                onEdit(task)
+            } label: {
+                Label("Edit", systemImage: "pencil")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(task.isReadOnly)
+            .help("Edit task configuration")
+
+            Button {
+                Task { await viewModel.refreshTaskStatus(task) }
+            } label: {
+                Label("Refresh", systemImage: "arrow.triangle.2.circlepath")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(viewModel.isLoading)
+            .help("Refresh task status")
+
+            Spacer()
+
+            Button(role: .destructive) {
+                showDeleteConfirmation = true
+            } label: {
+                Label("Delete", systemImage: "trash")
+                    .font(.caption)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(task.isReadOnly)
+            .help("Delete this task and its plist file")
         }
     }
 

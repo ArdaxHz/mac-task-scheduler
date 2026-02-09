@@ -14,6 +14,12 @@ actor TaskHistoryService {
     private var history: [UUID: [TaskExecutionResult]] = [:]
     private let maxHistoryPerTask = 100
 
+    /// Maximum characters to store per output stream in history.
+    private let maxOutputChars = 10_000
+
+    /// Debounce save: schedule a save after a short delay to coalesce rapid writes.
+    private var pendingSave: Task<Void, Never>?
+
     private var historyFileURL: URL {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = appSupport.appendingPathComponent("MacScheduler")
@@ -26,10 +32,7 @@ actor TaskHistoryService {
         }
     }
 
-    /// Maximum characters to store per output stream in history.
-    private let maxOutputChars = 10_000
-
-    func recordExecution(_ result: TaskExecutionResult) async {
+    func recordExecution(_ result: TaskExecutionResult) {
         // Truncate large outputs before storing to prevent history.json bloat
         let truncated = TaskExecutionResult(
             taskId: result.taskId,
@@ -49,7 +52,7 @@ actor TaskHistoryService {
 
         history[truncated.taskId] = taskHistory
 
-        await saveHistory()
+        scheduleSave()
     }
 
     private static func truncateOutput(_ output: String, maxChars: Int) -> String {
@@ -69,14 +72,31 @@ actor TaskHistoryService {
         Array(getAllHistory().prefix(limit))
     }
 
-    func clearHistory(for taskId: UUID) async {
+    func clearHistory(for taskId: UUID) {
         history.removeValue(forKey: taskId)
-        await saveHistory()
+        scheduleSave()
     }
 
-    func clearAllHistory() async {
+    func clearAllHistory() {
         history.removeAll()
-        await saveHistory()
+        scheduleSave()
+    }
+
+    /// Debounce disk writes: cancel any pending save and schedule a new one after 500ms.
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        pendingSave = Task {
+            try? await Task.sleep(nanoseconds: 500_000_000) // 500ms
+            guard !Task.isCancelled else { return }
+            await performSave()
+        }
+    }
+
+    /// Force an immediate save (called on app termination or explicit flush).
+    func flush() async {
+        pendingSave?.cancel()
+        pendingSave = nil
+        await performSave()
     }
 
     private func loadHistory() {
@@ -91,21 +111,25 @@ actor TaskHistoryService {
 
             let allResults = try decoder.decode([TaskExecutionResult].self, from: data)
 
+            // Group by taskId in a single pass
+            var grouped: [UUID: [TaskExecutionResult]] = [:]
+            grouped.reserveCapacity(Set(allResults.map(\.taskId)).count)
             for result in allResults {
-                var taskHistory = history[result.taskId] ?? []
-                taskHistory.append(result)
-                history[result.taskId] = taskHistory
+                grouped[result.taskId, default: []].append(result)
             }
 
-            for taskId in history.keys {
-                history[taskId]?.sort { $0.startTime > $1.startTime }
+            // Sort each group once
+            for taskId in grouped.keys {
+                grouped[taskId]?.sort { $0.startTime > $1.startTime }
             }
+
+            history = grouped
         } catch {
             print("Failed to load history: \(error)")
         }
     }
 
-    private func saveHistory() async {
+    private func performSave() async {
         let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         let appDir = appSupport.appendingPathComponent("MacScheduler")
 
@@ -115,7 +139,6 @@ actor TaskHistoryService {
             let allResults = history.values.flatMap { $0 }
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
-            encoder.outputFormatting = .prettyPrinted
 
             let data = try encoder.encode(allResults)
             try data.write(to: historyFileURL, options: .atomic)
