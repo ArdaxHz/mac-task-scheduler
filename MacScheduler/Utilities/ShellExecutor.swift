@@ -44,8 +44,8 @@ actor ShellExecutor {
         if let env = environment {
             var processEnv = ProcessInfo.processInfo.environment
             for (key, value) in env {
-                // Block dangerous environment variables that enable code injection
-                if !PlistGenerator.dangerousEnvVars.contains(key.uppercased()) {
+                // Block dangerous environment variables (case-insensitive check)
+                if !PlistGenerator.isDangerousEnvVar(key) {
                     processEnv[key] = value
                 }
             }

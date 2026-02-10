@@ -71,7 +71,8 @@ struct TaskListView: View {
         !viewModel.filterStates.isEmpty ||
         viewModel.filterBackend != nil ||
         viewModel.filterTriggerType != nil ||
-        viewModel.filterLastRun != .all
+        viewModel.filterLastRun != .all ||
+        viewModel.filterOwnership != .all
     }
 
     private var filterBar: some View {
@@ -244,6 +245,41 @@ struct TaskListView: View {
                 .fixedSize()
                 .help("Filter by last run status")
 
+                // User/System filter
+                Menu {
+                    ForEach(TaskListViewModel.OwnershipFilter.allCases, id: \.self) { filter in
+                        Button {
+                            viewModel.filterOwnership = filter
+                        } label: {
+                            HStack {
+                                Text(filter.rawValue)
+                                if viewModel.filterOwnership == filter {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "person.2")
+                            .font(.caption2)
+                        Text(viewModel.filterOwnership == .all ? "Scope" : viewModel.filterOwnership.rawValue)
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(viewModel.filterOwnership != .all ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .foregroundColor(viewModel.filterOwnership != .all ? .accentColor : .secondary)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(viewModel.filterOwnership != .all ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Filter by user or system tasks")
+
                 Spacer()
 
                 if hasActiveFilters {
@@ -252,6 +288,7 @@ struct TaskListView: View {
                         viewModel.filterBackend = nil
                         viewModel.filterTriggerType = nil
                         viewModel.filterLastRun = .all
+                        viewModel.filterOwnership = .all
                     } label: {
                         HStack(spacing: 3) {
                             Image(systemName: "xmark.circle.fill")
@@ -315,7 +352,17 @@ struct TaskListView: View {
             .width(min: 50, ideal: 70)
 
             TableColumn("Last Run", value: \.lastRunDate) { task in
-                if let lastRun = task.status.lastRun {
+                if task.status.state == .running, let start = task.status.processStartTime {
+                    Text("Up \(start, style: .relative)")
+                        .font(.caption)
+                        .foregroundColor(.blue)
+                        .help("Running since \(start.formatted(date: .abbreviated, time: .shortened))")
+                } else if task.status.state == .error, let exitCode = task.status.lastExitStatus {
+                    Text("Exit \(exitCode)")
+                        .font(.caption)
+                        .foregroundColor(.red)
+                        .help(task.status.lastRun != nil ? "Failed at \(task.status.lastRun!.formatted(date: .abbreviated, time: .shortened))" : "Failed with exit code \(exitCode)")
+                } else if let lastRun = task.status.lastRun {
                     Text(lastRun.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)
                         .foregroundColor(.secondary)

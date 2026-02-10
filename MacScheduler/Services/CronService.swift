@@ -158,6 +158,7 @@ class CronService: SchedulerService {
         while i < crontab.count {
             let line = crontab[i]
 
+            // Tagged entry (created by the app): tag line followed by cron line
             if line.hasPrefix(tagPrefix) {
                 let label = String(line.dropFirst(tagPrefix.count))
                 if i + 1 < crontab.count {
@@ -170,10 +171,33 @@ class CronService: SchedulerService {
                 }
             }
 
+            // Untagged entry (created outside the app): parse directly
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if !trimmed.isEmpty && !trimmed.hasPrefix("#") {
+                // Looks like a cron line — try to parse it
+                let label = "cron.\(labelFromCronCommand(trimmed))"
+                if let task = parseCronLine(trimmed, label: label) {
+                    tasks.append(task)
+                }
+            }
+
             i += 1
         }
 
         return tasks
+    }
+
+    /// Derive a stable label from a cron command for deterministic UUID generation.
+    private func labelFromCronCommand(_ cronLine: String) -> String {
+        let components = cronLine.components(separatedBy: .whitespaces).filter { !$0.isEmpty }
+        guard components.count >= 6 else { return "unknown" }
+        let command = components.dropFirst(5).joined(separator: " ")
+        // Use a short hash-like identifier from the command for a stable label
+        let sanitized = command
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_/")).inverted)
+            .joined()
+        let truncated = String(sanitized.prefix(60))
+        return truncated.isEmpty ? "unknown" : truncated
     }
 
     private func getCurrentCrontab() async throws -> [String] {

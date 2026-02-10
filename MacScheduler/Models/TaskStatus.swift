@@ -59,18 +59,26 @@ struct TaskStatus: Codable, Equatable {
     var nextScheduledRun: Date?
     var runCount: Int
     var failureCount: Int
+    /// For running tasks: when the current process started.
+    var processStartTime: Date?
+    /// For error tasks: the last exit code from launchctl.
+    var lastExitStatus: Int32?
 
     init(state: TaskState = .disabled,
          lastRun: Date? = nil,
          lastResult: TaskExecutionResult? = nil,
          nextScheduledRun: Date? = nil,
          runCount: Int = 0,
-         failureCount: Int = 0) {
+         failureCount: Int = 0,
+         processStartTime: Date? = nil,
+         lastExitStatus: Int32? = nil) {
         self.state = state
         self.lastRun = lastRun
         self.lastResult = lastResult
         self.nextScheduledRun = nextScheduledRun
         self.runCount = runCount
         self.failureCount = failureCount
+        self.processStartTime = processStartTime
+        self.lastExitStatus = lastExitStatus
     }
 }

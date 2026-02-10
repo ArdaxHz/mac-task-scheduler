@@ -21,11 +21,18 @@ class TaskListViewModel: ObservableObject {
     @Published var filterStates: Set<TaskState> = []
     @Published var filterTriggerType: TriggerType?
     @Published var filterLastRun: LastRunFilter = .all
+    @Published var filterOwnership: OwnershipFilter = .all
 
     enum LastRunFilter: String, CaseIterable {
         case all = "All"
         case hasRun = "Has Run"
         case neverRun = "Never Run"
+    }
+
+    enum OwnershipFilter: String, CaseIterable {
+        case all = "All"
+        case editable = "Editable"
+        case readOnly = "Read-Only"
     }
 
     private let historyService = TaskHistoryService.shared
@@ -57,6 +64,12 @@ class TaskListViewModel: ObservableObject {
         case .all: break
         case .hasRun: result = result.filter { $0.status.lastRun != nil }
         case .neverRun: result = result.filter { $0.status.lastRun == nil }
+        }
+
+        switch filterOwnership {
+        case .all: break
+        case .editable: result = result.filter { !$0.isReadOnly }
+        case .readOnly: result = result.filter { $0.isReadOnly }
         }
 
         return result
@@ -112,9 +125,6 @@ class TaskListViewModel: ObservableObject {
 
             var allTasks = Array(tasksById.values)
 
-            // Collect loaded launchd task indices for parallel info fetching
-            // Note: discoverTasks() already calls getAllLoadedLabels() internally
-            // and sets status.state, so we can check isEnabled instead of re-fetching.
             let launchdIndices = allTasks.indices.filter { allTasks[$0].backend == .launchd }
 
             // Enrich launchd tasks: file mtimes (cheap, synchronous)
@@ -124,10 +134,13 @@ class TaskListViewModel: ObservableObject {
                 }
             }
 
-            // Fetch launchctl print info in parallel for loaded tasks only
-            let loadedIndices = launchdIndices.filter { allTasks[$0].isEnabled }
+            // Fetch launchctl print info in parallel for loaded (enabled/running/error) tasks
+            let loadedIndices = launchdIndices.filter {
+                let state = allTasks[$0].status.state
+                return state == .enabled || state == .running || state == .error
+            }
             if !loadedIndices.isEmpty {
-                let infos: [(Int, (runs: Int, lastExitCode: Int32)?)] = await withTaskGroup(of: (Int, (runs: Int, lastExitCode: Int32)?).self) { group in
+                let infos: [(Int, LaunchdService.ServicePrintInfo?)] = await withTaskGroup(of: (Int, LaunchdService.ServicePrintInfo?).self) { group in
                     for i in loadedIndices {
                         let task = allTasks[i]
                         group.addTask {
@@ -135,7 +148,7 @@ class TaskListViewModel: ObservableObject {
                             return (i, info)
                         }
                     }
-                    var results: [(Int, (runs: Int, lastExitCode: Int32)?)] = []
+                    var results: [(Int, LaunchdService.ServicePrintInfo?)] = []
                     results.reserveCapacity(loadedIndices.count)
                     for await result in group {
                         results.append(result)
@@ -145,6 +158,19 @@ class TaskListViewModel: ObservableObject {
                 for (i, info) in infos {
                     if let info = info {
                         allTasks[i].status.runCount = info.runs
+
+                        if let pid = info.pid {
+                            // Running task: store process start time
+                            if let startTime = launchdService.getProcessStartTime(pid: pid) {
+                                allTasks[i].status.processStartTime = startTime
+                                allTasks[i].status.lastRun = startTime
+                            }
+                        }
+
+                        // Store last exit code for error tasks
+                        if allTasks[i].status.state == .error {
+                            allTasks[i].status.lastExitStatus = info.lastExitCode
+                        }
                     }
                 }
             }

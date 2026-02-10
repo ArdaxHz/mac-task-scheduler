@@ -93,13 +93,35 @@ struct TaskDetailView: View {
                 .foregroundColor(statusColor(for: task.status.state))
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(task.status.state.rawValue)
-                    .font(.headline)
+                HStack(spacing: 6) {
+                    Text(task.status.state.rawValue)
+                        .font(.headline)
+                    if task.status.state == .running, let start = task.status.processStartTime {
+                        Text("for \(runningDuration(since: start))")
+                            .font(.headline)
+                            .foregroundColor(.secondary)
+                    }
+                }
                 Text(task.launchdLabel)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundColor(.secondary)
                     .textSelection(.enabled)
                     .lineLimit(1)
+                if task.status.state == .error {
+                    HStack(spacing: 4) {
+                        if let exitCode = task.status.lastExitStatus {
+                            Text("Exit code \(exitCode)")
+                                .font(.caption)
+                                .fontWeight(.medium)
+                                .foregroundColor(.red)
+                        }
+                        if let lastRun = task.status.lastRun {
+                            Text("at \(lastRun.formatted(date: .abbreviated, time: .shortened))")
+                                .font(.caption)
+                                .foregroundColor(.red.opacity(0.8))
+                        }
+                    }
+                }
                 if !task.description.isEmpty {
                     Text(task.description)
                         .font(.subheadline)
@@ -364,12 +386,34 @@ struct TaskDetailView: View {
                             .foregroundColor(.secondary)
                     }
 
-                    if let lastRun = task.status.lastRun {
+                    if task.status.state == .running, let start = task.status.processStartTime {
+                        VStack(alignment: .leading) {
+                            Text(runningDuration(since: start))
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.blue)
+                            Text("Uptime")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    } else if let lastRun = task.status.lastRun {
                         VStack(alignment: .leading) {
                             Text(lastRun.formatted(date: .abbreviated, time: .shortened))
                                 .font(.title3)
                                 .fontWeight(.semibold)
                             Text("Last Run")
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                    }
+
+                    if task.status.state == .error, let exitCode = task.status.lastExitStatus {
+                        VStack(alignment: .leading) {
+                            Text("\(exitCode)")
+                                .font(.title2)
+                                .fontWeight(.semibold)
+                                .foregroundColor(.red)
+                            Text("Exit Code")
                                 .font(.caption)
                                 .foregroundColor(.secondary)
                         }
@@ -512,6 +556,21 @@ struct TaskDetailView: View {
             .controlSize(.small)
             .disabled(task.isReadOnly)
             .help("Delete this task and its plist file")
+        }
+    }
+
+    private func runningDuration(since start: Date) -> String {
+        let interval = Date().timeIntervalSince(start)
+        let hours = Int(interval) / 3600
+        let minutes = (Int(interval) % 3600) / 60
+        let seconds = Int(interval) % 60
+
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        } else if minutes > 0 {
+            return "\(minutes)m \(seconds)s"
+        } else {
+            return "\(seconds)s"
         }
     }
 

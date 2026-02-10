@@ -27,6 +27,8 @@ class LaunchdService: SchedulerService {
             (home.appendingPathComponent("Library/LaunchAgents"), true),
             (URL(fileURLWithPath: "/Library/LaunchAgents"), false),
             (URL(fileURLWithPath: "/Library/LaunchDaemons"), false),
+            (URL(fileURLWithPath: "/System/Library/LaunchAgents"), false),
+            (URL(fileURLWithPath: "/System/Library/LaunchDaemons"), false),
         ]
     }
 
@@ -282,8 +284,15 @@ class LaunchdService: SchedulerService {
         return nil
     }
 
-    /// Read run count and last exit code from launchctl print.
-    func getLaunchdInfo(for task: ScheduledTask) async -> (runs: Int, lastExitCode: Int32)? {
+    /// Info extracted from `launchctl print` for a specific service.
+    struct ServicePrintInfo {
+        let runs: Int
+        let lastExitCode: Int32
+        let pid: Int?
+    }
+
+    /// Read run count, last exit code, and PID from launchctl print.
+    func getLaunchdInfo(for task: ScheduledTask) async -> ServicePrintInfo? {
         let uid = getuid()
         do {
             let result = try await shellExecutor.execute(
@@ -295,49 +304,81 @@ class LaunchdService: SchedulerService {
 
             var runs = 0
             var lastExit: Int32 = 0
+            var pid: Int?
 
             for line in result.standardOutput.components(separatedBy: "\n") {
                 let trimmed = line.trimmingCharacters(in: .whitespaces)
                 if trimmed.hasPrefix("runs = ") {
                     runs = Int(trimmed.dropFirst("runs = ".count)) ?? 0
-                } else if trimmed.hasPrefix("last exit reason = ") {
-                    if let bracketRange = trimmed.range(of: #"\[(\d+)\]"#, options: .regularExpression) {
-                        let codeStr = trimmed[bracketRange].dropFirst().dropLast()
-                        lastExit = Int32(codeStr) ?? 0
+                } else if trimmed.hasPrefix("last exit code = ") {
+                    // Format: "last exit code = 0" or "last exit code = (never exited)"
+                    let value = String(trimmed.dropFirst("last exit code = ".count))
+                    if let code = Int32(value) {
+                        lastExit = code
                     }
+                } else if trimmed.hasPrefix("pid = ") {
+                    pid = Int(trimmed.dropFirst("pid = ".count))
                 }
             }
-            return (runs, lastExit)
+            return ServicePrintInfo(runs: runs, lastExitCode: lastExit, pid: pid)
         } catch {
             return nil
         }
     }
 
-    /// Get all loaded launchd labels in a single call (much faster than per-task isLoaded).
-    func getAllLoadedLabels() async -> Set<String> {
+    /// Get process start time from PID using sysctl (avoids spawning `ps`).
+    func getProcessStartTime(pid: Int) -> Date? {
+        var info = kinfo_proc()
+        var size = MemoryLayout<kinfo_proc>.stride
+        var mib = [CTL_KERN, KERN_PROC, KERN_PROC_PID, Int32(pid)]
+        guard sysctl(&mib, UInt32(mib.count), &info, &size, nil, 0) == 0, size > 0 else {
+            return nil
+        }
+        let tv = info.kp_proc.p_starttime
+        return Date(timeIntervalSince1970: Double(tv.tv_sec) + Double(tv.tv_usec) / 1_000_000)
+    }
+
+    /// Info about a loaded launchd service from `launchctl list`.
+    struct LoadedServiceInfo {
+        let pid: Int?          // nil if not currently running
+        let lastExitStatus: Int32
+    }
+
+    /// Get all loaded launchd labels with PID and exit status in a single call.
+    func getAllLoadedServices() async -> [String: LoadedServiceInfo] {
         do {
             let result = try await shellExecutor.execute(
                 command: "/bin/launchctl",
                 arguments: ["list"],
                 timeout: 10.0
             )
-            guard result.exitCode == 0 else { return [] }
-            var labels = Set<String>()
+            guard result.exitCode == 0 else { return [:] }
+            var services: [String: LoadedServiceInfo] = [:]
             for line in result.standardOutput.components(separatedBy: "\n") {
                 let parts = line.components(separatedBy: "\t")
                 if parts.count >= 3 {
-                    labels.insert(parts[2])
+                    let pidStr = parts[0]
+                    let statusStr = parts[1]
+                    let label = parts[2]
+                    let pid = pidStr == "-" ? nil : Int(pidStr)
+                    let exitStatus = Int32(statusStr) ?? 0
+                    services[label] = LoadedServiceInfo(pid: pid, lastExitStatus: exitStatus)
                 }
             }
-            return labels
+            return services
         } catch {
-            return []
+            return [:]
         }
+    }
+
+    /// Convenience: just the labels (for backward compat).
+    func getAllLoadedLabels() async -> Set<String> {
+        Set(await getAllLoadedServices().keys)
     }
 
     /// Discover tasks from all launchd directories.
     func discoverTasks() async throws -> [ScheduledTask] {
-        let loadedLabels = await getAllLoadedLabels()
+        let loadedServices = await getAllLoadedServices()
         var tasks: [ScheduledTask] = []
 
         for dir in allLaunchDirectories {
@@ -348,7 +389,18 @@ class LaunchdService: SchedulerService {
 
             for url in contents where url.pathExtension == "plist" {
                 if var task = parsePlist(at: url, isUserWritable: dir.isUserWritable) {
-                    task.status.state = loadedLabels.contains(task.launchdLabel) ? .enabled : .disabled
+                    if let info = loadedServices[task.launchdLabel] {
+                        if info.pid != nil {
+                            task.status.state = .running
+                        } else if info.lastExitStatus != 0 {
+                            task.status.state = .error
+                            task.status.lastExitStatus = info.lastExitStatus
+                        } else {
+                            task.status.state = .enabled
+                        }
+                    } else {
+                        task.status.state = .disabled
+                    }
                     task.plistFilePath = url.path
                     tasks.append(task)
                 }

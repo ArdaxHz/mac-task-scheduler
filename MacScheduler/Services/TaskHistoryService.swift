@@ -17,6 +17,9 @@ actor TaskHistoryService {
     /// Maximum characters to store per output stream in history.
     private let maxOutputChars = 10_000
 
+    /// Maximum total entries across all tasks to bound memory usage.
+    private let maxTotalEntries = 10_000
+
     /// Debounce save: schedule a save after a short delay to coalesce rapid writes.
     private var pendingSave: Task<Void, Never>?
 
@@ -29,6 +32,7 @@ actor TaskHistoryService {
     private init() {
         Task {
             await loadHistory()
+            await purgeOldEntries()
         }
     }
 
@@ -80,6 +84,44 @@ actor TaskHistoryService {
     func clearAllHistory() {
         history.removeAll()
         scheduleSave()
+    }
+
+    /// Remove entries older than the configured retention period and enforce total entry cap.
+    private func purgeOldEntries() {
+        let retentionDays = UserDefaults.standard.integer(forKey: "logRetentionDays")
+        guard retentionDays > 0 else { return } // 0 = keep forever
+
+        let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) ?? Date()
+        var didPurge = false
+
+        for taskId in history.keys {
+            let before = history[taskId]?.count ?? 0
+            history[taskId] = history[taskId]?.filter { $0.startTime > cutoff }
+            if history[taskId]?.isEmpty == true {
+                history.removeValue(forKey: taskId)
+            }
+            if (history[taskId]?.count ?? 0) != before {
+                didPurge = true
+            }
+        }
+
+        // Enforce total entry cap to bound memory
+        let totalCount = history.values.reduce(0) { $0 + $1.count }
+        if totalCount > maxTotalEntries {
+            var all = history.values.flatMap { $0 }.sorted { $0.startTime > $1.startTime }
+            let keep = Set(all.prefix(maxTotalEntries).map { $0.id })
+            for taskId in history.keys {
+                history[taskId] = history[taskId]?.filter { keep.contains($0.id) }
+                if history[taskId]?.isEmpty == true {
+                    history.removeValue(forKey: taskId)
+                }
+            }
+            didPurge = true
+        }
+
+        if didPurge {
+            scheduleSave()
+        }
     }
 
     /// Debounce disk writes: cancel any pending save and schedule a new one after 500ms.

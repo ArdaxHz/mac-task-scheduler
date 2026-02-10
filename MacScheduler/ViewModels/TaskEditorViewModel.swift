@@ -365,6 +365,25 @@ class TaskEditorViewModel: ObservableObject {
             validationErrors.append("\(label) must be an absolute path")
             return
         }
+
+        // Resolve symlinks to prevent symlink attacks
+        let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
+
+        // Block system-critical directories
+        let systemDirs = ["/System", "/usr", "/bin", "/sbin", "/private/var", "/private/etc", "/etc"]
+        for dir in systemDirs {
+            if resolved.hasPrefix(dir + "/") || resolved == dir {
+                validationErrors.append("\(label) must not point to a system directory")
+                return
+            }
+        }
+
+        // Verify parent directory exists
+        let parentDir = (resolved as NSString).deletingLastPathComponent
+        if !FileManager.default.fileExists(atPath: parentDir) {
+            validationErrors.append("\(label) parent directory does not exist")
+            return
+        }
     }
 
     /// Scripts directory from user preferences, falling back to ~/Library/Scripts.
@@ -428,28 +447,66 @@ class TaskEditorViewModel: ObservableObject {
         return nil
     }
 
-    /// Strip null bytes and other dangerous control characters from a string.
-    /// Preserves newlines and tabs which are valid in script content.
-    private static func sanitizeInput(_ string: String) -> String {
-        string.filter { char in
-            guard let ascii = char.asciiValue else { return true } // Allow non-ASCII (unicode)
-            // Allow printable ASCII (32-126), newline, tab, carriage return
-            return ascii >= 32 || ascii == 10 || ascii == 9 || ascii == 13
-        }
+    /// Unicode scalars that can manipulate text rendering (bidi overrides, zero-width chars).
+    private static let dangerousUnicodeScalars: Set<Unicode.Scalar> = [
+        "\u{200B}", // Zero-width space
+        "\u{200C}", // Zero-width non-joiner
+        "\u{200D}", // Zero-width joiner
+        "\u{200E}", // Left-to-right mark
+        "\u{200F}", // Right-to-left mark
+        "\u{202A}", // Left-to-right embedding
+        "\u{202B}", // Right-to-left embedding
+        "\u{202C}", // Pop directional formatting
+        "\u{202D}", // Left-to-right override
+        "\u{202E}", // Right-to-left override (can visually hide malicious code)
+        "\u{2066}", // Left-to-right isolate
+        "\u{2067}", // Right-to-left isolate
+        "\u{2068}", // First strong isolate
+        "\u{2069}", // Pop directional isolate
+        "\u{FEFF}", // BOM / zero-width no-break space
+    ]
+
+    /// Strip control characters and dangerous Unicode from a single-line field (name, label, description).
+    /// Does NOT allow newlines — use sanitizeScriptContent for multi-line script content.
+    private static func sanitizeNameField(_ string: String) -> String {
+        string.unicodeScalars.filter { scalar in
+            guard scalar.value != 0 else { return false }
+            guard !dangerousUnicodeScalars.contains(scalar) else { return false }
+            if scalar.isASCII {
+                return scalar.value >= 32 || scalar.value == 9 // printable + tab
+            }
+            return true
+        }.map { String($0) }.joined()
     }
 
-    /// Strip null bytes from paths (newlines are not valid in paths).
+    /// Strip control characters and dangerous Unicode from script content.
+    /// Allows newlines and tabs which are valid in scripts.
+    private static func sanitizeScriptContent(_ string: String) -> String {
+        string.unicodeScalars.filter { scalar in
+            guard scalar.value != 0 else { return false }
+            guard !dangerousUnicodeScalars.contains(scalar) else { return false }
+            if scalar.isASCII {
+                return scalar.value >= 32 || scalar.value == 10 || scalar.value == 9 || scalar.value == 13
+            }
+            return true
+        }.map { String($0) }.joined()
+    }
+
+    /// Strip null bytes and control characters from paths.
     private static func sanitizePath(_ string: String) -> String {
-        string.filter { $0 != "\0" }
+        string.filter { char in
+            guard let ascii = char.asciiValue else { return true }
+            return ascii >= 32 // Block all control chars including null, newline, tab in paths
+        }
     }
 
     func buildTask() -> ScheduledTask {
         // Sanitize all user inputs before building the task
         let cleanPath = Self.sanitizePath(executablePath)
         let cleanWorkDir = Self.sanitizePath(workingDirectory)
-        let cleanLabel = Self.sanitizeInput(taskLabel).trimmingCharacters(in: .whitespaces)
-        let cleanName = Self.sanitizeInput(name).trimmingCharacters(in: .whitespaces)
-        let cleanDescription = Self.sanitizeInput(taskDescription)
+        let cleanLabel = Self.sanitizeNameField(taskLabel).trimmingCharacters(in: .whitespaces)
+        let cleanName = Self.sanitizeNameField(name).trimmingCharacters(in: .whitespaces)
+        let cleanDescription = Self.sanitizeNameField(taskDescription)
         let cleanStdOut = Self.sanitizePath(standardOutPath)
         let cleanStdErr = Self.sanitizePath(standardErrorPath)
 
