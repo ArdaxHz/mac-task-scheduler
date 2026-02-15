@@ -22,6 +22,14 @@ class TaskListViewModel: ObservableObject {
     @Published var filterTriggerType: TriggerType?
     @Published var filterLastRun: LastRunFilter = .all
     @Published var filterOwnership: OwnershipFilter = .all
+    @Published var filterLocation: LocationFilter = .all
+
+    enum LocationFilter: String, CaseIterable {
+        case all = "All"
+        case userAgent = "User Agent"
+        case systemAgent = "System Agent"
+        case systemDaemon = "System Daemon"
+    }
 
     enum LastRunFilter: String, CaseIterable {
         case all = "All"
@@ -70,6 +78,13 @@ class TaskListViewModel: ObservableObject {
         case .all: break
         case .editable: result = result.filter { !$0.isReadOnly }
         case .readOnly: result = result.filter { $0.isReadOnly }
+        }
+
+        switch filterLocation {
+        case .all: break
+        case .userAgent: result = result.filter { $0.location == .userAgent }
+        case .systemAgent: result = result.filter { $0.location == .systemAgent }
+        case .systemDaemon: result = result.filter { $0.location == .systemDaemon }
         }
 
         return result

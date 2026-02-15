@@ -79,14 +79,33 @@ struct TaskAction: Codable, Equatable, Identifiable {
         }
     }
 
+    /// Check if a string contains null bytes or non-tab/non-newline control characters.
+    private static func containsDangerousChars(_ string: String) -> Bool {
+        string.unicodeScalars.contains { scalar in
+            scalar.value == 0 || (scalar.isASCII && scalar.value < 32 && scalar.value != 9 && scalar.value != 10 && scalar.value != 13)
+        }
+    }
+
     func validate() -> [String] {
         var errors: [String] = []
+
+        // Validate path for dangerous characters
+        if !path.isEmpty && Self.containsDangerousChars(path) {
+            errors.append("Path contains invalid control characters")
+        }
+
+        // Validate arguments for dangerous characters
+        for (i, arg) in arguments.enumerated() {
+            if Self.containsDangerousChars(arg) {
+                errors.append("Argument \(i + 1) contains invalid control characters")
+            }
+        }
 
         switch type {
         case .executable:
             if path.isEmpty {
                 errors.append("Executable path is required")
-            } else if !FileManager.default.fileExists(atPath: path) {
+            } else if !path.contains("\0"), !FileManager.default.fileExists(atPath: path) {
                 errors.append("Executable not found at path: \(path)")
             }
         case .shellScript:
@@ -99,11 +118,21 @@ struct TaskAction: Codable, Equatable, Identifiable {
             }
         }
 
+        // Validate working directory
         if let workDir = workingDirectory, !workDir.isEmpty {
-            var isDir: ObjCBool = false
-            if !FileManager.default.fileExists(atPath: workDir, isDirectory: &isDir) || !isDir.boolValue {
-                errors.append("Working directory does not exist: \(workDir)")
+            if Self.containsDangerousChars(workDir) {
+                errors.append("Working directory contains invalid control characters")
+            } else {
+                var isDir: ObjCBool = false
+                if !FileManager.default.fileExists(atPath: workDir, isDirectory: &isDir) || !isDir.boolValue {
+                    errors.append("Working directory does not exist: \(workDir)")
+                }
             }
+        }
+
+        // Validate script content for null bytes
+        if let script = scriptContent, script.contains("\0") {
+            errors.append("Script content contains null bytes")
         }
 
         return errors

@@ -205,6 +205,11 @@ class PlistGenerator {
             parts.append("    <key>StandardErrorPath</key>")
             parts.append("    <string>\(escapeXML(errPath))</string>")
         }
+
+        if let userName = task.userName, !userName.isEmpty {
+            parts.append("    <key>UserName</key>")
+            parts.append("    <string>\(escapeXML(userName))</string>")
+        }
     }
 
     private func appendMetadataSection(for task: ScheduledTask, to parts: inout [String]) {

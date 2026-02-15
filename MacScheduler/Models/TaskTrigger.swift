@@ -167,8 +167,9 @@ struct TaskTrigger: Codable, Equatable, Identifiable {
                 errors.append("Calendar schedule is required")
             }
         case .interval:
-            if intervalSeconds == nil || intervalSeconds! <= 0 {
+            guard let seconds = intervalSeconds, seconds > 0 else {
                 errors.append("Interval must be greater than 0")
+                break
             }
         case .atLogin, .atStartup, .onDemand:
             break

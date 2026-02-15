@@ -41,16 +41,20 @@ actor ShellExecutor {
             process.currentDirectoryURL = URL(fileURLWithPath: workDir)
         }
 
+        // Always filter dangerous env vars from the process environment,
+        // even when no custom env is specified (prevents inheriting DYLD_INSERT_LIBRARIES etc.)
+        var processEnv = ProcessInfo.processInfo.environment
+        for key in processEnv.keys where PlistGenerator.isDangerousEnvVar(key) {
+            processEnv.removeValue(forKey: key)
+        }
         if let env = environment {
-            var processEnv = ProcessInfo.processInfo.environment
             for (key, value) in env {
-                // Block dangerous environment variables (case-insensitive check)
                 if !PlistGenerator.isDangerousEnvVar(key) {
                     processEnv[key] = value
                 }
             }
-            process.environment = processEnv
         }
+        process.environment = processEnv
 
         do {
             try process.run()

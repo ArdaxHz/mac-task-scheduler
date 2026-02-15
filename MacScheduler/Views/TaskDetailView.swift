@@ -14,6 +14,7 @@ struct TaskDetailView: View {
 
     @State private var showDeleteConfirmation = false
     @State private var showScriptEditor = false
+    @State private var showExecutionHistory = false
 
     private var scriptPath: String? {
         if task.action.type == .shellScript {
@@ -64,6 +65,9 @@ struct TaskDetailView: View {
                 ScriptEditorView(scriptPath: path, taskName: task.name)
             }
         }
+        .sheet(isPresented: $showExecutionHistory) {
+            TaskExecutionHistorySheet(task: task)
+        }
     }
 
     private var headerSection: some View {
@@ -87,32 +91,27 @@ struct TaskDetailView: View {
 
     @ViewBuilder
     private func headerRow(compact: Bool) -> some View {
-        HStack {
+        HStack(alignment: .top) {
             Image(systemName: task.status.state.systemImage)
                 .font(.title)
                 .foregroundColor(statusColor(for: task.status.state))
 
             VStack(alignment: .leading, spacing: 4) {
+                Text(task.name)
+                    .font(.headline)
                 HStack(spacing: 6) {
                     Text(task.status.state.rawValue)
-                        .font(.headline)
+                        .font(.caption)
+                        .foregroundColor(statusColor(for: task.status.state))
                     if task.status.state == .running, let start = task.status.processStartTime {
                         Text("for \(runningDuration(since: start))")
-                            .font(.headline)
+                            .font(.caption)
                             .foregroundColor(.secondary)
                     }
-                }
-                Text(task.launchdLabel)
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundColor(.secondary)
-                    .textSelection(.enabled)
-                    .lineLimit(1)
-                if task.status.state == .error {
-                    HStack(spacing: 4) {
+                    if task.status.state == .error {
                         if let exitCode = task.status.lastExitStatus {
                             Text("Exit code \(exitCode)")
                                 .font(.caption)
-                                .fontWeight(.medium)
                                 .foregroundColor(.red)
                         }
                         if let lastRun = task.status.lastRun {
@@ -122,6 +121,11 @@ struct TaskDetailView: View {
                         }
                     }
                 }
+                Text(task.launchdLabel)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(.secondary)
+                    .textSelection(.enabled)
+                    .lineLimit(1)
                 if !task.description.isEmpty {
                     Text(task.description)
                         .font(.subheadline)
@@ -341,8 +345,14 @@ struct TaskDetailView: View {
                     InfoRow(label: "Standard Error", value: errPath, monospaced: true)
                 }
 
+                InfoRow(label: "Location", value: task.location.rawValue)
+
+                if let userName = task.userName, !userName.isEmpty {
+                    InfoRow(label: "Run As User", value: userName)
+                }
+
                 if let dir = task.plistFilePath {
-                    InfoRow(label: "Plist Location", value: dir, monospaced: true)
+                    InfoRow(label: "Plist Path", value: dir, monospaced: true)
                 }
 
                 if task.isReadOnly {
@@ -361,8 +371,20 @@ struct TaskDetailView: View {
     private var historySection: some View {
         GroupBox {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Execution History", systemImage: "clock.arrow.circlepath")
-                    .font(.headline)
+                HStack {
+                    Label("Execution History", systemImage: "clock.arrow.circlepath")
+                        .font(.headline)
+                    Spacer()
+                    Button {
+                        showExecutionHistory = true
+                    } label: {
+                        Label("View All", systemImage: "list.bullet")
+                            .font(.caption)
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                    .help("View all past executions")
+                }
 
                 Divider()
 
@@ -607,6 +629,92 @@ struct InfoRow: View {
 
             Spacer()
         }
+    }
+}
+
+struct TaskExecutionHistorySheet: View {
+    @Environment(\.dismiss) private var dismiss
+    let task: ScheduledTask
+    @State private var history: [TaskExecutionResult] = []
+    @State private var selectedResult: TaskExecutionResult?
+    private let historyService = TaskHistoryService.shared
+
+    var body: some View {
+        NavigationStack {
+            Group {
+                if history.isEmpty {
+                    ContentUnavailableView {
+                        Label("No Executions", systemImage: "clock.arrow.circlepath")
+                    } description: {
+                        Text("No execution history recorded for this task.\nOnly runs triggered via \"Run Now\" in this app are tracked.")
+                    }
+                } else {
+                    List(history) { result in
+                        TaskExecutionRow(result: result)
+                            .contentShape(Rectangle())
+                            .onTapGesture {
+                                selectedResult = result
+                            }
+                    }
+                }
+            }
+            .navigationTitle("Executions — \(task.name)")
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }
+                }
+            }
+        }
+        .frame(minWidth: 550, minHeight: 400)
+        .task {
+            history = await historyService.getHistory(for: task.id)
+        }
+        .sheet(item: $selectedResult) { result in
+            ExecutionDetailSheet(result: result, taskName: task.name)
+        }
+    }
+}
+
+struct TaskExecutionRow: View {
+    let result: TaskExecutionResult
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Image(systemName: result.success ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .foregroundColor(result.success ? .green : .red)
+                .font(.title3)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(result.startTime.formatted(date: .abbreviated, time: .shortened))
+                    .fontWeight(.medium)
+                Text("\(result.startTime, style: .relative) ago")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            Text(String(format: "%.2fs", result.duration))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundColor(.secondary)
+                .frame(width: 60, alignment: .trailing)
+
+            Text("Exit \(result.exitCode)")
+                .font(.caption)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(result.success ? Color.green.opacity(0.2) : Color.red.opacity(0.2))
+                .cornerRadius(4)
+                .fixedSize()
+
+            if !result.standardOutput.isEmpty || !result.standardError.isEmpty {
+                Image(systemName: "doc.text")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .help("Has output — click to view")
+            }
+        }
+        .padding(.vertical, 4)
     }
 }
 

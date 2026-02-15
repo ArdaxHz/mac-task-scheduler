@@ -161,6 +161,13 @@ struct ScriptEditorView: View {
     }
 
     private func saveScript() {
+        // Validate the path is safe before writing
+        guard TaskEditorViewModel.isSafeScriptWritePath(scriptPath) else {
+            errorMessage = "Cannot write to this path — it is in a protected location."
+            showError = true
+            return
+        }
+
         do {
             try scriptContent.write(toFile: scriptPath, atomically: true, encoding: .utf8)
             originalContent = scriptContent

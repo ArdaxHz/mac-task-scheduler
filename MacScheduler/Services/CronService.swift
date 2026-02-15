@@ -223,9 +223,12 @@ class CronService: SchedulerService {
         let tempDir = FileManager.default.temporaryDirectory
         let tempFile = tempDir.appendingPathComponent(UUID().uuidString + ".crontab")
 
-        try crontabContent.write(to: tempFile, atomically: true, encoding: .utf8)
-        // Restrict permissions to owner-only to prevent other processes from reading/modifying
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tempFile.path)
+        // Create temp file with restricted permissions atomically to prevent race condition
+        let data = Data(crontabContent.utf8)
+        guard FileManager.default.createFile(atPath: tempFile.path, contents: data,
+                                             attributes: [.posixPermissions: 0o600]) else {
+            throw SchedulerError.cronUpdateFailed("Failed to create temp crontab file")
+        }
         defer {
             try? FileManager.default.removeItem(at: tempFile)
         }

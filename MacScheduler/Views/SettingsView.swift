@@ -68,7 +68,7 @@ struct SettingsView: View {
         let fm = FileManager.default
 
         // Remove app data directory (execution history, scripts)
-        let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else { return }
         let appDir = appSupport.appendingPathComponent("MacScheduler")
         try? fm.removeItem(at: appDir)
 
@@ -183,6 +183,37 @@ struct SettingsView: View {
 
     private var aboutSettings: some View {
         Form {
+            Section {
+                VStack(spacing: 12) {
+                    Image(systemName: "calendar.badge.clock")
+                        .font(.system(size: 48))
+                        .foregroundColor(.accentColor)
+
+                    Text("Mac Task Scheduler")
+                        .font(.title2)
+                        .fontWeight(.bold)
+
+                    Text("v\(appVersion)")
+                        .font(.title3)
+                        .foregroundColor(.secondary)
+
+                    Text("by Ardax")
+                        .font(.subheadline)
+                        .foregroundColor(.secondary)
+
+                    Button {
+                        if let url = URL(string: "https://github.com/ArdaxHz/mac-task-scheduler") {
+                            NSWorkspace.shared.open(url)
+                        }
+                    } label: {
+                        Label("GitHub Repository", systemImage: "link")
+                    }
+                    .buttonStyle(.link)
+                }
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 8)
+            }
+
             Section("Application") {
                 HStack {
                     Text("Version")

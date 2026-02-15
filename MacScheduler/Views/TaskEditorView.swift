@@ -100,6 +100,62 @@ struct TaskEditorView: View {
             }
             .pickerStyle(.segmented)
             .help("launchd is the native macOS scheduler; cron is the traditional Unix scheduler")
+
+            if editorViewModel.backend == .launchd {
+                Picker("Location", selection: $editorViewModel.location) {
+                    ForEach(TaskLocation.allCases, id: \.self) { loc in
+                        Label(loc.rawValue, systemImage: loc.systemImage).tag(loc)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    locationHelpRow(
+                        icon: "person",
+                        title: "User Agent",
+                        desc: "Runs only when you are logged in. Installed to ~/Library/LaunchAgents/.",
+                        isActive: editorViewModel.location == .userAgent
+                    )
+                    locationHelpRow(
+                        icon: "person.2",
+                        title: "System Agent",
+                        desc: "Runs for all users when any user is logged in. Installed to /Library/LaunchAgents/. Requires admin.",
+                        isActive: editorViewModel.location == .systemAgent
+                    )
+                    locationHelpRow(
+                        icon: "gearshape.2",
+                        title: "System Daemon",
+                        desc: "Runs at boot before any user logs in. Can specify which user to run as. Installed to /Library/LaunchDaemons/. Requires admin.",
+                        isActive: editorViewModel.location == .systemDaemon
+                    )
+                }
+                .padding(8)
+                .background(Color(.textBackgroundColor))
+                .cornerRadius(6)
+
+                if editorViewModel.location == .systemDaemon {
+                    Picker("Run As User", selection: $editorViewModel.userName) {
+                        Text("Default (root)").tag("")
+                        Divider()
+                        ForEach(TaskEditorViewModel.systemUsers, id: \.self) { user in
+                            Text(user).tag(user)
+                        }
+                    }
+                    .help("The user account that will run this daemon")
+                }
+
+                if editorViewModel.location.requiresElevation {
+                    HStack(spacing: 6) {
+                        Image(systemName: "lock.shield")
+                            .foregroundColor(.orange)
+                        Text("Admin password will be required to save this task.")
+                            .font(.caption)
+                            .foregroundColor(.orange)
+                    }
+                    .padding(8)
+                    .background(Color.orange.opacity(0.1))
+                    .cornerRadius(6)
+                }
+            }
         }
     }
 
@@ -131,6 +187,7 @@ struct TaskEditorView: View {
                 }
                 .help("Browse for working directory")
             }
+            .help("The folder the task runs in. Relative file paths in your script will resolve from here. Leave empty to use the system default (/).")
 
             tccWarning(for: $editorViewModel.workingDirectory, isDirectory: true)
         }
@@ -264,7 +321,8 @@ struct TaskEditorView: View {
             }
             .frame(maxWidth: .infinity)
 
-            let totalSeconds = editorViewModel.intervalValue * editorViewModel.intervalUnit.multiplier
+            let (product, overflow) = editorViewModel.intervalValue.multipliedReportingOverflow(by: editorViewModel.intervalUnit.multiplier)
+            let totalSeconds = overflow ? Int.max : product
             Text("Runs every \(formattedInterval(totalSeconds))")
                 .font(.caption)
                 .foregroundColor(.secondary)
@@ -309,7 +367,14 @@ struct TaskEditorView: View {
 
             HStack {
                 TextField("Standard Output Path (optional)", text: $editorViewModel.standardOutPath)
-                    .help("File path where the task's standard output will be written")
+                    .help("File path where the task's standard output will be written. Useful for debugging — check this file to see what your task printed.")
+                Button {
+                    editorViewModel.setDefaultOutputPaths()
+                } label: {
+                    Text("Use Default")
+                        .font(.caption)
+                }
+                .help("Set to ~/Library/Logs/MacScheduler/<task-label>.stdout.log")
                 Button {
                     filePickerField = .standardOut
                     showFilePicker = true
@@ -323,7 +388,14 @@ struct TaskEditorView: View {
 
             HStack {
                 TextField("Standard Error Path (optional)", text: $editorViewModel.standardErrorPath)
-                    .help("File path where the task's error output will be written")
+                    .help("File path where the task's error output will be written. Check this file when a task fails to see error messages.")
+                Button {
+                    editorViewModel.setDefaultOutputPaths()
+                } label: {
+                    Text("Use Default")
+                        .font(.caption)
+                }
+                .help("Set to ~/Library/Logs/MacScheduler/<task-label>.stderr.log")
                 Button {
                     filePickerField = .standardError
                     showFilePicker = true
@@ -380,6 +452,23 @@ struct TaskEditorView: View {
             .padding(8)
             .background(Color.orange.opacity(0.1))
             .cornerRadius(6)
+        }
+    }
+
+    private func locationHelpRow(icon: String, title: String, desc: String, isActive: Bool) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon)
+                .frame(width: 16)
+                .foregroundColor(isActive ? .accentColor : .secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.caption)
+                    .fontWeight(isActive ? .semibold : .regular)
+                    .foregroundColor(isActive ? .primary : .secondary)
+                Text(desc)
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
         }
     }
 

@@ -15,6 +15,8 @@ struct TaskListView: View {
 
     @State private var sortOrder = [KeyPathComparator(\ScheduledTask.name, order: .forward)]
     @State private var selectedTaskId: UUID?
+    @State private var showLoadAllConfirm = false
+    @State private var showUnloadAllConfirm = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -29,6 +31,22 @@ struct TaskListView: View {
             }
         }
         .navigationTitle("Scheduled Tasks")
+        .alert("Load All Daemons", isPresented: $showLoadAllConfirm) {
+            Button("Load All", role: .destructive) {
+                Task { await viewModel.loadAllDaemons() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will load all unloaded launchd tasks into the daemon. Only continue if you know what you're doing.")
+        }
+        .alert("Unload All Daemons", isPresented: $showUnloadAllConfirm) {
+            Button("Unload All", role: .destructive) {
+                Task { await viewModel.unloadAllDaemons() }
+            }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("This will unload all loaded launchd tasks from the daemon. Only continue if you know what you're doing.")
+        }
         .toolbar {
             ToolbarItemGroup {
                 Button {
@@ -49,7 +67,7 @@ struct TaskListView: View {
                 .disabled(viewModel.isLoading)
 
                 Button {
-                    Task { await viewModel.loadAllDaemons() }
+                    showLoadAllConfirm = true
                 } label: {
                     Label("Load All", systemImage: "arrow.up.circle")
                 }
@@ -57,7 +75,7 @@ struct TaskListView: View {
                 .disabled(viewModel.isLoading)
 
                 Button {
-                    Task { await viewModel.unloadAllDaemons() }
+                    showUnloadAllConfirm = true
                 } label: {
                     Label("Unload All", systemImage: "arrow.down.circle")
                 }
@@ -72,7 +90,8 @@ struct TaskListView: View {
         viewModel.filterBackend != nil ||
         viewModel.filterTriggerType != nil ||
         viewModel.filterLastRun != .all ||
-        viewModel.filterOwnership != .all
+        viewModel.filterOwnership != .all ||
+        viewModel.filterLocation != .all
     }
 
     private var filterBar: some View {
@@ -280,6 +299,41 @@ struct TaskListView: View {
                 .fixedSize()
                 .help("Filter by user or system tasks")
 
+                // Location filter
+                Menu {
+                    ForEach(TaskListViewModel.LocationFilter.allCases, id: \.self) { filter in
+                        Button {
+                            viewModel.filterLocation = filter
+                        } label: {
+                            HStack {
+                                Text(filter.rawValue)
+                                if viewModel.filterLocation == filter {
+                                    Image(systemName: "checkmark")
+                                }
+                            }
+                        }
+                    }
+                } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "tray.2")
+                            .font(.caption2)
+                        Text(viewModel.filterLocation == .all ? "Location" : viewModel.filterLocation.rawValue)
+                            .font(.caption)
+                    }
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(viewModel.filterLocation != .all ? Color.accentColor.opacity(0.15) : Color.clear)
+                    .foregroundColor(viewModel.filterLocation != .all ? .accentColor : .secondary)
+                    .cornerRadius(6)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .strokeBorder(viewModel.filterLocation != .all ? Color.accentColor.opacity(0.4) : Color.secondary.opacity(0.3), lineWidth: 1)
+                    )
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .help("Filter by task location")
+
                 Spacer()
 
                 if hasActiveFilters {
@@ -289,6 +343,7 @@ struct TaskListView: View {
                         viewModel.filterTriggerType = nil
                         viewModel.filterLastRun = .all
                         viewModel.filterOwnership = .all
+                        viewModel.filterLocation = .all
                     } label: {
                         HStack(spacing: 3) {
                             Image(systemName: "xmark.circle.fill")

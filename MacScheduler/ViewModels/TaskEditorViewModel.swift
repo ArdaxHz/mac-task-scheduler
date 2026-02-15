@@ -31,6 +31,8 @@ class TaskEditorViewModel: ObservableObject {
     @Published var keepAlive: Bool = false
     @Published var standardOutPath: String = ""
     @Published var standardErrorPath: String = ""
+    @Published var location: TaskLocation = .userAgent
+    @Published var userName: String = ""
 
     @Published var validationErrors: [String] = []
     @Published var showValidationErrors = false
@@ -158,6 +160,8 @@ class TaskEditorViewModel: ObservableObject {
         keepAlive = task.keepAlive
         standardOutPath = task.standardOutPath ?? ""
         standardErrorPath = task.standardErrorPath ?? ""
+        location = task.location
+        userName = task.userName ?? ""
     }
 
     func reset() {
@@ -183,8 +187,39 @@ class TaskEditorViewModel: ObservableObject {
         keepAlive = false
         standardOutPath = ""
         standardErrorPath = ""
+        location = .userAgent
+        userName = ""
         validationErrors = []
         showValidationErrors = false
+    }
+
+    /// Default log directory for task output.
+    static var defaultLogDirectory: String {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/MacScheduler").path
+    }
+
+    /// Allowlist-sanitize a string for use in filenames: only [a-zA-Z0-9._-] pass through.
+    private static let filenameAllowedChars = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
+
+    /// Set stdout and stderr paths to the default log directory using the task label.
+    func setDefaultOutputPaths() {
+        let logDir = Self.defaultLogDirectory
+        // Ensure directory exists
+        try? FileManager.default.createDirectory(
+            atPath: logDir, withIntermediateDirectories: true)
+        let sanitizedLabel = taskLabel.isEmpty ? "task" : String(taskLabel.unicodeScalars.map { scalar in
+            if Self.filenameAllowedChars.contains(scalar) {
+                return Character(scalar)
+            }
+            return Character("_")
+        })
+        if standardOutPath.isEmpty {
+            standardOutPath = "\(logDir)/\(sanitizedLabel).stdout.log"
+        }
+        if standardErrorPath.isEmpty {
+            standardErrorPath = "\(logDir)/\(sanitizedLabel).stderr.log"
+        }
     }
 
     /// Auto-generate label from name if label is empty or was auto-generated.
@@ -298,8 +333,11 @@ class TaskEditorViewModel: ObservableObject {
         if triggerType == .interval {
             if intervalValue <= 0 {
                 validationErrors.append("Interval must be greater than 0")
-            } else if intervalValue * intervalUnit.multiplier > 31_536_000 {
-                validationErrors.append("Interval must not exceed 1 year")
+            } else {
+                let (product, overflow) = intervalValue.multipliedReportingOverflow(by: intervalUnit.multiplier)
+                if overflow || product > 31_536_000 {
+                    validationErrors.append("Interval must not exceed 1 year")
+                }
             }
         }
 
@@ -319,6 +357,16 @@ class TaskEditorViewModel: ObservableObject {
             }
             if let month = scheduleMonth, (month < 1 || month > 12) {
                 validationErrors.append("Month must be between 1 and 12")
+            }
+        }
+
+        // --- UserName ---
+        if !userName.isEmpty {
+            let userNameAllowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-"))
+            if userName.rangeOfCharacter(from: userNameAllowed.inverted) != nil {
+                validationErrors.append("User name may only contain letters, numbers, '_', and '-'")
+            } else if userName.count > 255 {
+                validationErrors.append("User name is too long (max 255 characters)")
             }
         }
 
@@ -447,6 +495,27 @@ class TaskEditorViewModel: ObservableObject {
         return nil
     }
 
+    /// Get available user accounts for the UserName picker.
+    static var systemUsers: [String] {
+        var users: [String] = []
+        let homeDir = "/Users"
+        if let contents = try? FileManager.default.contentsOfDirectory(atPath: homeDir) {
+            for name in contents.sorted() {
+                let path = "\(homeDir)/\(name)"
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+                   isDir.boolValue,
+                   !name.hasPrefix("."),
+                   name != "Shared" {
+                    users.append(name)
+                }
+            }
+        }
+        // Add common system accounts
+        users.append(contentsOf: ["root", "nobody", "_www"])
+        return users
+    }
+
     /// Unicode scalars that can manipulate text rendering (bidi overrides, zero-width chars).
     private static let dangerousUnicodeScalars: Set<Unicode.Scalar> = [
         "\u{200B}", // Zero-width space
@@ -512,15 +581,16 @@ class TaskEditorViewModel: ObservableObject {
 
         // For file-based scripts, write edited content back to the file
         // and don't embed it inline in the plist
+        let cleanScript = Self.sanitizeScriptContent(scriptContent)
         var inlineScript: String? = nil
-        if (actionType == .shellScript || actionType == .appleScript) && !scriptContent.isEmpty {
+        if (actionType == .shellScript || actionType == .appleScript) && !cleanScript.isEmpty {
             if !cleanPath.isEmpty && Self.isSafeScriptWritePath(cleanPath) {
                 // File-based script: save content back to the file
-                try? scriptContent.write(toFile: cleanPath, atomically: true, encoding: .utf8)
+                try? cleanScript.write(toFile: cleanPath, atomically: true, encoding: .utf8)
                 try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: cleanPath)
             } else if cleanPath.isEmpty {
                 // No file path: use as inline script content
-                inlineScript = scriptContent
+                inlineScript = cleanScript
             }
             // If executablePath is set but not safe to write, reference the file without modifying it
         }
@@ -529,7 +599,9 @@ class TaskEditorViewModel: ObservableObject {
             id: editingTask?.action.id ?? UUID(),
             type: actionType,
             path: cleanPath,
-            arguments: arguments.isEmpty ? [] : arguments.components(separatedBy: " "),
+            arguments: arguments.isEmpty ? [] : Self.sanitizeNameField(arguments)
+                .components(separatedBy: " ")
+                .filter { !$0.isEmpty },
             workingDirectory: cleanWorkDir.isEmpty ? nil : cleanWorkDir,
             environmentVariables: [:],
             scriptContent: inlineScript
@@ -550,10 +622,12 @@ class TaskEditorViewModel: ObservableObject {
                 )
             )
         case .interval:
+            let (product, overflow) = intervalValue.multipliedReportingOverflow(by: intervalUnit.multiplier)
+            let clampedInterval = overflow ? 31_536_000 : min(product, 31_536_000)
             trigger = TaskTrigger(
                 id: editingTask?.trigger.id ?? UUID(),
                 type: .interval,
-                intervalSeconds: intervalValue * intervalUnit.multiplier
+                intervalSeconds: max(1, clampedInterval)
             )
         case .atLogin:
             trigger = .atLogin
@@ -579,7 +653,9 @@ class TaskEditorViewModel: ObservableObject {
             standardErrorPath: cleanStdErr.isEmpty ? nil : cleanStdErr,
             launchdLabel: cleanLabel,
             isReadOnly: editingTask?.isReadOnly ?? false,
-            plistFilePath: editingTask?.plistFilePath
+            plistFilePath: editingTask?.plistFilePath,
+            location: location,
+            userName: userName.isEmpty ? nil : userName
         )
     }
 }

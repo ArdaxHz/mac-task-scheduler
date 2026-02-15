@@ -8,6 +8,36 @@
 
 import Foundation
 
+/// Where a launchd plist is installed.
+enum TaskLocation: String, Codable, CaseIterable {
+    case userAgent = "User Agent"
+    case systemAgent = "System Agent"
+    case systemDaemon = "System Daemon"
+
+    var directory: String {
+        switch self {
+        case .userAgent:
+            return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents").path
+        case .systemAgent:
+            return "/Library/LaunchAgents"
+        case .systemDaemon:
+            return "/Library/LaunchDaemons"
+        }
+    }
+
+    var requiresElevation: Bool {
+        self != .userAgent
+    }
+
+    var systemImage: String {
+        switch self {
+        case .userAgent: return "person"
+        case .systemAgent: return "person.2"
+        case .systemDaemon: return "gearshape.2"
+        }
+    }
+}
+
 enum SchedulerBackend: String, Codable, CaseIterable {
     case launchd = "launchd"
     case cron = "cron"
@@ -46,6 +76,10 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     var isReadOnly: Bool
     /// Full path to the plist file on disk (set during discovery, nil for new tasks).
     var plistFilePath: String?
+    /// Where this task's plist is installed (user agent, system agent, or system daemon).
+    var location: TaskLocation
+    /// For system daemons: the user to run as (UserName key in plist).
+    var userName: String?
 
     init(id: UUID = UUID(),
          name: String = "",
@@ -62,7 +96,9 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
          standardErrorPath: String? = nil,
          launchdLabel: String = "",
          isReadOnly: Bool = false,
-         plistFilePath: String? = nil) {
+         plistFilePath: String? = nil,
+         location: TaskLocation = .userAgent,
+         userName: String? = nil) {
         self.id = id
         self.name = name
         self.description = description
@@ -79,13 +115,20 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
         self.launchdLabel = launchdLabel
         self.isReadOnly = isReadOnly
         self.plistFilePath = plistFilePath
+        self.location = location
+        self.userName = userName
     }
 
     var plistFileName: String {
-        // Sanitize label to prevent path traversal (e.g. "../" in label)
-        let sanitized = launchdLabel
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "..", with: "_")
+        // Allowlist sanitization: only permit safe filename characters
+        let sanitized = String(launchdLabel.unicodeScalars.map { scalar in
+            if scalar.isASCII,
+               scalar.value >= 0x20,
+               "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-".unicodeScalars.contains(scalar) {
+                return Character(scalar)
+            }
+            return Character("_")
+        })
         return "\(sanitized).plist"
     }
 
@@ -122,7 +165,11 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     }
 
     var cronTag: String {
-        "# CronTask:\(launchdLabel)"
+        // Strip newlines/carriage returns to prevent cron line injection
+        let safeLabel = launchdLabel
+            .replacingOccurrences(of: "\n", with: "")
+            .replacingOccurrences(of: "\r", with: "")
+        return "# CronTask:\(safeLabel)"
     }
 
     var isEnabled: Bool {
@@ -135,11 +182,22 @@ struct ScheduledTask: Codable, Identifiable, Equatable {
     var backendName: String { backend.rawValue }
     var lastRunDate: Date { status.lastRun ?? .distantPast }
 
+    /// Characters allowed in launchd labels (reverse DNS convention).
+    private static let labelAllowedCharacters = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-_"))
+
     func validate() -> [String] {
         var errors: [String] = []
 
-        if launchdLabel.trimmingCharacters(in: .whitespaces).isEmpty {
+        let trimmedLabel = launchdLabel.trimmingCharacters(in: .whitespaces)
+        if trimmedLabel.isEmpty {
             errors.append("Task label is required")
+        } else {
+            if trimmedLabel.rangeOfCharacter(from: Self.labelAllowedCharacters.inverted) != nil {
+                errors.append("Task label may only contain letters, numbers, '.', '-', and '_'")
+            }
+            if trimmedLabel.count > 255 {
+                errors.append("Task label is too long (max 255 characters)")
+            }
         }
 
         errors.append(contentsOf: action.validate())

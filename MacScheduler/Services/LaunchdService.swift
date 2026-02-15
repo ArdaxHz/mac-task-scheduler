@@ -21,14 +21,14 @@ class LaunchdService: SchedulerService {
     }
 
     /// All directories to scan for launchd plists.
-    private var allLaunchDirectories: [(url: URL, isUserWritable: Bool)] {
+    private var allLaunchDirectories: [(url: URL, isUserWritable: Bool, location: TaskLocation)] {
         let home = fileManager.homeDirectoryForCurrentUser
         return [
-            (home.appendingPathComponent("Library/LaunchAgents"), true),
-            (URL(fileURLWithPath: "/Library/LaunchAgents"), false),
-            (URL(fileURLWithPath: "/Library/LaunchDaemons"), false),
-            (URL(fileURLWithPath: "/System/Library/LaunchAgents"), false),
-            (URL(fileURLWithPath: "/System/Library/LaunchDaemons"), false),
+            (home.appendingPathComponent("Library/LaunchAgents"), true, .userAgent),
+            (URL(fileURLWithPath: "/Library/LaunchAgents"), true, .systemAgent),
+            (URL(fileURLWithPath: "/Library/LaunchDaemons"), true, .systemDaemon),
+            (URL(fileURLWithPath: "/System/Library/LaunchAgents"), false, .systemAgent),
+            (URL(fileURLWithPath: "/System/Library/LaunchDaemons"), false, .systemDaemon),
         ]
     }
 
@@ -41,40 +41,133 @@ class LaunchdService: SchedulerService {
                                          withIntermediateDirectories: true)
     }
 
-    /// Default path for new tasks (in user LaunchAgents).
-    private func defaultPlistURL(for task: ScheduledTask) -> URL {
-        userLaunchAgentsDirectory.appendingPathComponent(task.plistFileName)
+    /// Plist URL for a task in its target location directory.
+    private func plistURL(for task: ScheduledTask) -> URL {
+        URL(fileURLWithPath: task.location.directory).appendingPathComponent(task.plistFileName)
     }
 
-    /// Resolve the actual plist path: use stored path if available, otherwise construct from label.
+    /// Default path for new tasks (in user LaunchAgents) — kept for backward compat.
+    private func defaultPlistURL(for task: ScheduledTask) -> URL {
+        plistURL(for: task)
+    }
+
+    /// Resolve the actual plist path: use stored path if available and validated, otherwise construct from label.
     private func resolvedPlistPath(for task: ScheduledTask) -> String {
         if let path = task.plistFilePath, fileManager.fileExists(atPath: path) {
-            return path
+            // Validate that the stored path is within a known launch directory
+            let resolvedPath = URL(fileURLWithPath: path).standardizedFileURL.path
+            let isInKnownDirectory = allLaunchDirectories.contains { dir in
+                resolvedPath.hasPrefix(dir.url.standardizedFileURL.path + "/")
+            }
+            if isInKnownDirectory {
+                return path
+            }
         }
-        return defaultPlistURL(for: task).path
+        return plistURL(for: task).path
+    }
+
+    // MARK: - Elevated Privilege Helpers
+
+    /// Escape a string for embedding inside an AppleScript `do shell script "..."` context.
+    /// Must handle: backslash, double-quote, dollar sign, backtick, exclamation mark, newline, carriage return.
+    private func escapeForAppleScript(_ string: String) -> String {
+        var result = string
+        result = result.replacingOccurrences(of: "\\", with: "\\\\")
+        result = result.replacingOccurrences(of: "\"", with: "\\\"")
+        result = result.replacingOccurrences(of: "$", with: "\\$")
+        result = result.replacingOccurrences(of: "`", with: "\\`")
+        result = result.replacingOccurrences(of: "!", with: "\\!")
+        result = result.replacingOccurrences(of: "\n", with: "")
+        result = result.replacingOccurrences(of: "\r", with: "")
+        return result
+    }
+
+    /// Run a shell command with admin privileges via osascript.
+    /// The script string must already be properly quoted/escaped for the shell.
+    private func executeElevated(script: String) async throws {
+        let escaped = escapeForAppleScript(script)
+        let result = try await shellExecutor.execute(
+            command: "/usr/bin/osascript",
+            arguments: ["-e", "do shell script \"\(escaped)\" with administrator privileges"]
+        )
+        if result.exitCode != 0 {
+            throw SchedulerError.plistCreationFailed(result.standardError)
+        }
+    }
+
+    /// Write a file to a path, using elevated privileges if needed.
+    private func writeFile(content: String, to path: String, elevated: Bool) async throws {
+        if elevated {
+            // Write to temp file with restricted permissions atomically
+            let tempFile = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".plist")
+            let data = Data(content.utf8)
+            guard fileManager.createFile(atPath: tempFile.path, contents: data,
+                                         attributes: [.posixPermissions: 0o600]) else {
+                throw SchedulerError.plistCreationFailed("Failed to create temp file")
+            }
+            defer { try? fileManager.removeItem(at: tempFile) }
+            let quotedTemp = shellQuote(tempFile.path)
+            let quotedPath = shellQuote(path)
+            try await executeElevated(script: "mv \(quotedTemp) \(quotedPath) && chmod 644 \(quotedPath) && chown root:wheel \(quotedPath)")
+        } else {
+            try content.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
+    /// Delete a file, using elevated privileges if needed.
+    private func deleteFile(at path: String, elevated: Bool) async throws {
+        if elevated {
+            try await executeElevated(script: "rm -f \(shellQuote(path))")
+        } else {
+            try fileManager.removeItem(atPath: path)
+        }
+    }
+
+    /// Run launchctl load/unload, with sudo if elevated.
+    private func launchctl(_ action: String, path: String, elevated: Bool) async throws -> ShellResult {
+        // Validate action to prevent injection
+        guard action == "load" || action == "unload" else {
+            throw SchedulerError.commandExecutionFailed("Invalid launchctl action: \(action)")
+        }
+        if elevated {
+            let quotedPath = shellQuote(path)
+            let script = "launchctl \(action) \(quotedPath)"
+            let escaped = escapeForAppleScript(script)
+            let result = try await shellExecutor.execute(
+                command: "/usr/bin/osascript",
+                arguments: ["-e", "do shell script \"\(escaped)\" with administrator privileges"]
+            )
+            return result
+        } else {
+            return try await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: [action, path]
+            )
+        }
     }
 
     func install(task: ScheduledTask) async throws {
         let plistContent = plistGenerator.generate(for: task)
-        let plistURL = defaultPlistURL(for: task)
+        let plistPath = plistURL(for: task).path
+        let elevated = task.location.requiresElevation
 
         do {
-            try plistContent.write(to: plistURL, atomically: true, encoding: .utf8)
+            try await writeFile(content: plistContent, to: plistPath, elevated: elevated)
         } catch {
             throw SchedulerError.plistCreationFailed(error.localizedDescription)
         }
     }
 
     func uninstall(task: ScheduledTask) async throws {
-        let isLoaded = await isLoaded(label: task.launchdLabel)
-        if isLoaded {
+        let isCurrentlyLoaded = await isLoaded(label: task.launchdLabel)
+        if isCurrentlyLoaded {
             try await disable(task: task)
         }
 
         let path = resolvedPlistPath(for: task)
         if fileManager.fileExists(atPath: path) {
             do {
-                try fileManager.removeItem(atPath: path)
+                try await deleteFile(at: path, elevated: task.location.requiresElevation)
             } catch {
                 throw SchedulerError.fileSystemError(error.localizedDescription)
             }
@@ -83,25 +176,19 @@ class LaunchdService: SchedulerService {
 
     func enable(task: ScheduledTask) async throws {
         let path = resolvedPlistPath(for: task)
+        let elevated = task.location.requiresElevation
 
         guard fileManager.fileExists(atPath: path) else {
             try await install(task: task)
-            let newPath = defaultPlistURL(for: task).path
-            let result = try await shellExecutor.execute(
-                command: "/bin/launchctl",
-                arguments: ["load", newPath]
-            )
+            let newPath = plistURL(for: task).path
+            let result = try await launchctl("load", path: newPath, elevated: elevated)
             if result.exitCode != 0 && !result.standardError.contains("already loaded") {
                 throw SchedulerError.plistLoadFailed(result.standardError)
             }
             return
         }
 
-        let result = try await shellExecutor.execute(
-            command: "/bin/launchctl",
-            arguments: ["load", path]
-        )
-
+        let result = try await launchctl("load", path: path, elevated: elevated)
         if result.exitCode != 0 && !result.standardError.contains("already loaded") {
             throw SchedulerError.plistLoadFailed(result.standardError)
         }
@@ -109,16 +196,13 @@ class LaunchdService: SchedulerService {
 
     func disable(task: ScheduledTask) async throws {
         let path = resolvedPlistPath(for: task)
+        let elevated = task.location.requiresElevation
 
         guard fileManager.fileExists(atPath: path) else {
             return
         }
 
-        let result = try await shellExecutor.execute(
-            command: "/bin/launchctl",
-            arguments: ["unload", path]
-        )
-
+        let result = try await launchctl("unload", path: path, elevated: elevated)
         if result.exitCode != 0 && !result.standardError.contains("Could not find") {
             throw SchedulerError.plistUnloadFailed(result.standardError)
         }
@@ -126,44 +210,38 @@ class LaunchdService: SchedulerService {
 
     /// Robust update: unload old label, delete old plist, write new plist, load new.
     func updateTask(oldTask: ScheduledTask, newTask: ScheduledTask) async throws {
-        // 1. Always try to unload old task (don't check isLoaded — avoids stale state)
+        let oldElevated = oldTask.location.requiresElevation
+        let newElevated = newTask.location.requiresElevation
+
+        // 1. Always try to unload old task
         let oldPath = resolvedPlistPath(for: oldTask)
         if fileManager.fileExists(atPath: oldPath) {
-            let _ = try? await shellExecutor.execute(
-                command: "/bin/launchctl",
-                arguments: ["unload", oldPath]
-            )
+            let _ = try? await launchctl("unload", path: oldPath, elevated: oldElevated)
         }
 
-        // 2. Delete old plist file (handles label/filename change)
+        // 2. Delete old plist file
         if fileManager.fileExists(atPath: oldPath) {
-            try? fileManager.removeItem(atPath: oldPath)
+            try? await deleteFile(at: oldPath, elevated: oldElevated)
         }
 
-        // 3. Write new plist file (always to user LaunchAgents)
+        // 3. Write new plist file to target location
         let plistContent = plistGenerator.generate(for: newTask)
-        let newPlistURL = defaultPlistURL(for: newTask)
+        let newPlistPath = plistURL(for: newTask).path
         do {
-            try plistContent.write(to: newPlistURL, atomically: true, encoding: .utf8)
+            try await writeFile(content: plistContent, to: newPlistPath, elevated: newElevated)
         } catch {
             throw SchedulerError.plistCreationFailed(error.localizedDescription)
         }
 
-        // 4. Always load new plist to register with launchd
-        let loadResult = try await shellExecutor.execute(
-            command: "/bin/launchctl",
-            arguments: ["load", newPlistURL.path]
-        )
+        // 4. Load new plist
+        let loadResult = try await launchctl("load", path: newPlistPath, elevated: newElevated)
         if loadResult.exitCode != 0 && !loadResult.standardError.contains("already loaded") {
             throw SchedulerError.plistLoadFailed(loadResult.standardError)
         }
 
         // 5. If task should be disabled, unload after registering
         if !newTask.isEnabled {
-            let _ = try? await shellExecutor.execute(
-                command: "/bin/launchctl",
-                arguments: ["unload", newPlistURL.path]
-            )
+            let _ = try? await launchctl("unload", path: newPlistPath, elevated: newElevated)
         }
     }
 
@@ -180,12 +258,12 @@ class LaunchdService: SchedulerService {
                 environment: task.action.environmentVariables
             )
             if directResult.exitCode == 126 {
-                let fullCommand = ([task.action.path] + task.action.arguments)
-                    .map { shellQuote($0) }
-                    .joined(separator: " ")
+                // Exit 126 = permission denied. Try chmod +x and retry directly
+                // instead of wrapping in a shell, which introduces shell interpretation.
+                try? fileManager.setAttributes([.posixPermissions: 0o755], ofItemAtPath: task.action.path)
                 result = try await shellExecutor.execute(
-                    command: "/bin/sh",
-                    arguments: ["-c", fullCommand],
+                    command: task.action.path,
+                    arguments: task.action.arguments,
                     workingDirectory: task.action.workingDirectory,
                     environment: task.action.environmentVariables
                 )
@@ -402,6 +480,7 @@ class LaunchdService: SchedulerService {
                         task.status.state = .disabled
                     }
                     task.plistFilePath = url.path
+                    task.location = dir.location
                     tasks.append(task)
                 }
             }
@@ -436,6 +515,10 @@ class LaunchdService: SchedulerService {
 
         if let customDesc = plist["MacSchedulerDescription"] as? String {
             task.description = customDesc
+        }
+
+        if let userName = plist["UserName"] as? String {
+            task.userName = userName
         }
 
         if let program = plist["Program"] as? String {

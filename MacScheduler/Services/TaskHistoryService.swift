@@ -24,7 +24,9 @@ actor TaskHistoryService {
     private var pendingSave: Task<Void, Never>?
 
     private var historyFileURL: URL {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return fileManager.temporaryDirectory.appendingPathComponent("MacScheduler/history.json")
+        }
         let appDir = appSupport.appendingPathComponent("MacScheduler")
         return appDir.appendingPathComponent("history.json")
     }
@@ -172,7 +174,9 @@ actor TaskHistoryService {
     }
 
     private func performSave() async {
-        let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return
+        }
         let appDir = appSupport.appendingPathComponent("MacScheduler")
 
         try? fileManager.createDirectory(at: appDir, withIntermediateDirectories: true)
