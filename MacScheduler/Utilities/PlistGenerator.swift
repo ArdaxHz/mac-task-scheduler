@@ -224,8 +224,18 @@ class PlistGenerator {
         }
     }
 
+    /// Escape a string for safe embedding in XML 1.0.
+    /// Strips control characters that are invalid in XML 1.0 (0x00-0x08, 0x0B, 0x0C, 0x0E-0x1F)
+    /// and escapes the five XML special characters.
     private func escapeXML(_ string: String) -> String {
-        string
+        // First strip XML-invalid control characters, keeping only tab (0x09), newline (0x0A), CR (0x0D)
+        let cleaned = String(string.unicodeScalars.filter { scalar in
+            if scalar.isASCII && scalar.value < 0x20 {
+                return scalar.value == 0x09 || scalar.value == 0x0A || scalar.value == 0x0D
+            }
+            return true
+        })
+        return cleaned
             .replacingOccurrences(of: "&", with: "&amp;")
             .replacingOccurrences(of: "<", with: "&lt;")
             .replacingOccurrences(of: ">", with: "&gt;")

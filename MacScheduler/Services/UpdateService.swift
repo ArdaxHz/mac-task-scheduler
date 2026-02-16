@@ -73,18 +73,32 @@ actor UpdateService {
     /// Extract semver from tag like "v1.2.0-abc1234" → "1.2.0"
     private func extractVersion(from tag: String) -> String {
         var version = tag
+        // Strip surrounding quotes (defense against CI quoting issues)
+        version = version.replacingOccurrences(of: "\"", with: "")
         if version.hasPrefix("v") { version = String(version.dropFirst()) }
-        // Strip anything after a dash (commit hash suffix)
+        // Strip anything after a dash (commit hash suffix, pre-release label)
         if let dashIndex = version.firstIndex(of: "-") {
             version = String(version[..<dashIndex])
         }
         return version
     }
 
+    /// Parse a version string into numeric components, stripping any pre-release suffix.
+    /// e.g. "1.3.0-alpha" → [1, 3, 0], "1.3.0" → [1, 3, 0]
+    private func parseVersion(_ version: String) -> [Int] {
+        // Strip quotes defensively
+        var cleaned = version.replacingOccurrences(of: "\"", with: "")
+        // Strip pre-release suffix (e.g. "-alpha", "-beta") before splitting
+        if let dashIndex = cleaned.firstIndex(of: "-") {
+            cleaned = String(cleaned[..<dashIndex])
+        }
+        return cleaned.split(separator: ".").compactMap { Int($0) }
+    }
+
     /// Compare semver strings. Returns true if remote is newer than current.
     private func isNewer(remote: String, current: String) -> Bool {
-        let remoteParts = remote.split(separator: ".").compactMap { Int($0) }
-        let currentParts = current.split(separator: ".").compactMap { Int($0) }
+        let remoteParts = parseVersion(remote)
+        let currentParts = parseVersion(current)
 
         for i in 0..<max(remoteParts.count, currentParts.count) {
             let r = i < remoteParts.count ? remoteParts[i] : 0

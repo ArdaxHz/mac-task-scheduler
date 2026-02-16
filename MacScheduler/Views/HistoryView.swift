@@ -30,7 +30,7 @@ struct HistoryView: View {
                 historyList
             }
         }
-        .navigationTitle("Manual Execution History")
+        .navigationTitle("Execution History")
         .toolbar {
             ToolbarItemGroup {
                 Button {

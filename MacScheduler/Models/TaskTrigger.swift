@@ -163,7 +163,23 @@ struct TaskTrigger: Codable, Equatable, Identifiable {
 
         switch type {
         case .calendar:
-            if calendarSchedule == nil {
+            if let schedule = calendarSchedule {
+                if let minute = schedule.minute, (minute < 0 || minute > 59) {
+                    errors.append("Minute must be between 0 and 59")
+                }
+                if let hour = schedule.hour, (hour < 0 || hour > 23) {
+                    errors.append("Hour must be between 0 and 23")
+                }
+                if let day = schedule.day, (day < 1 || day > 31) {
+                    errors.append("Day must be between 1 and 31")
+                }
+                if let weekday = schedule.weekday, (weekday < 0 || weekday > 6) {
+                    errors.append("Weekday must be between 0 (Sunday) and 6 (Saturday)")
+                }
+                if let month = schedule.month, (month < 1 || month > 12) {
+                    errors.append("Month must be between 1 and 12")
+                }
+            } else {
                 errors.append("Calendar schedule is required")
             }
         case .interval:

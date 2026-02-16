@@ -266,11 +266,11 @@ class CronService: SchedulerService {
     }
 
     /// Shell-quote a string so it's safe to embed in a cron command line.
-    /// Also strips newlines to prevent crontab line injection.
+    /// Strips null bytes (which can truncate C strings) and newlines (which would inject cron entries).
     private func shellQuote(_ string: String) -> String {
         if string.isEmpty { return "''" }
-        // Strip newlines and carriage returns — a newline in a cron line would inject a new cron entry
         let sanitized = string
+            .replacingOccurrences(of: "\0", with: "")
             .replacingOccurrences(of: "\n", with: " ")
             .replacingOccurrences(of: "\r", with: " ")
         // Wrap in single quotes, escaping any embedded single quotes
@@ -343,18 +343,23 @@ class CronService: SchedulerService {
         if command.hasPrefix("/bin/bash -c") {
             task.action.type = .shellScript
             if let scriptRange = command.range(of: "-c '") {
-                let script = String(command[scriptRange.upperBound...].dropLast())
-                task.action.scriptContent = script
+                let afterQuote = String(command[scriptRange.upperBound...])
+                if afterQuote.hasSuffix("'") && afterQuote.count > 1 {
+                    task.action.scriptContent = String(afterQuote.dropLast())
+                }
             }
         } else if command.hasPrefix("/usr/bin/osascript -e") {
             task.action.type = .appleScript
             if let scriptRange = command.range(of: "-e '") {
-                let script = String(command[scriptRange.upperBound...].dropLast())
-                task.action.scriptContent = script
+                let afterQuote = String(command[scriptRange.upperBound...])
+                if afterQuote.hasSuffix("'") && afterQuote.count > 1 {
+                    task.action.scriptContent = String(afterQuote.dropLast())
+                }
             }
         } else {
             task.action.type = .executable
-            let parts = command.components(separatedBy: " ")
+            let parts = command.components(separatedBy: " ").filter { !$0.isEmpty }
+            guard !parts.isEmpty else { return nil }
             task.action.path = parts[0]
             task.action.arguments = Array(parts.dropFirst())
         }

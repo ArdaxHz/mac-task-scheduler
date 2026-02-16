@@ -504,8 +504,107 @@ struct TaskDetailView: View {
                         }
                     }
                 }
+
+                logFileOutputSection
             }
         }
+    }
+
+    /// Show stdout/stderr log file contents from native launchd execution (not just "Run Now").
+    @ViewBuilder
+    private var logFileOutputSection: some View {
+        let stdoutContent = readLogFileTail(task.standardOutPath)
+        let stderrContent = readLogFileTail(task.standardErrorPath)
+
+        if stdoutContent != nil || stderrContent != nil {
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Log Output")
+                        .font(.subheadline)
+                        .fontWeight(.medium)
+                    Spacer()
+                    Text("From log files on disk")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+
+                if let stdout = stdoutContent {
+                    logFileBox(
+                        label: "Standard Output",
+                        path: task.standardOutPath ?? "",
+                        content: stdout,
+                        isError: false
+                    )
+                }
+
+                if let stderr = stderrContent {
+                    logFileBox(
+                        label: "Standard Error",
+                        path: task.standardErrorPath ?? "",
+                        content: stderr,
+                        isError: true
+                    )
+                }
+            }
+        }
+    }
+
+    private func logFileBox(label: String, path: String, content: String, isError: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text(label)
+                    .font(.caption)
+                    .foregroundColor(isError ? .red : .secondary)
+                Spacer()
+                Button {
+                    NSWorkspace.shared.selectFile(path, inFileViewerRootedAtPath: "")
+                } label: {
+                    Image(systemName: "folder")
+                        .font(.caption)
+                }
+                .buttonStyle(.borderless)
+                .help("Reveal log file in Finder")
+            }
+            ScrollView {
+                Text(content)
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundColor(isError ? .red : .primary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 120)
+            .padding(8)
+            .background(isError ? Color.red.opacity(0.1) : Color(.textBackgroundColor))
+            .cornerRadius(6)
+        }
+    }
+
+    /// Read the last portion of a log file, returning nil if the file doesn't exist or is empty.
+    private func readLogFileTail(_ path: String?, maxBytes: Int = 8192) -> String? {
+        guard let path = path, !path.isEmpty,
+              FileManager.default.fileExists(atPath: path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let fileSize = attrs[.size] as? UInt64,
+              fileSize > 0 else {
+            return nil
+        }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { handle.closeFile() }
+
+        let readSize = min(UInt64(maxBytes), fileSize)
+        if fileSize > readSize {
+            handle.seek(toFileOffset: fileSize - readSize)
+        }
+        let data = handle.readData(ofLength: Int(readSize))
+        guard let content = String(data: data, encoding: .utf8), !content.isEmpty else { return nil }
+
+        // If we truncated, indicate that
+        if fileSize > readSize {
+            return "[... showing last \(readSize) bytes ...]\n" + content
+        }
+        return content
     }
 
     @ViewBuilder
@@ -646,7 +745,7 @@ struct TaskExecutionHistorySheet: View {
                     ContentUnavailableView {
                         Label("No Executions", systemImage: "clock.arrow.circlepath")
                     } description: {
-                        Text("No execution history recorded for this task.\nOnly runs triggered via \"Run Now\" in this app are tracked.")
+                        Text("No execution history recorded for this task.\nCheck the Log Output section in the task detail for output from scheduled runs.")
                     }
                 } else {
                     List(history) { result in

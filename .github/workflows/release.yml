@@ -107,7 +107,7 @@ jobs:
         id: version
         run: |
           SHORT_SHA=$(echo ${{ github.sha }} | cut -c1-7)
-          APP_VERSION=$(sed -n 's/.*MARKETING_VERSION = \(.*\);/\1/p' MacScheduler.xcodeproj/project.pbxproj | head -1 | tr -d '[:space:]')
+          APP_VERSION=$(sed -n 's/.*MARKETING_VERSION = \(.*\);/\1/p' MacScheduler.xcodeproj/project.pbxproj | head -1 | tr -d '[:space:]"')
           TAG="v${APP_VERSION}-${SHORT_SHA}"
           echo "tag=$TAG" >> $GITHUB_OUTPUT
           echo "app_version=$APP_VERSION" >> $GITHUB_OUTPUT

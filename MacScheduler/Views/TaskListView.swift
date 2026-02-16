@@ -416,7 +416,12 @@ struct TaskListView: View {
                     Text("Exit \(exitCode)")
                         .font(.caption)
                         .foregroundColor(.red)
-                        .help(task.status.lastRun != nil ? "Failed at \(task.status.lastRun!.formatted(date: .abbreviated, time: .shortened))" : "Failed with exit code \(exitCode)")
+                        .help({
+                            if let lastRun = task.status.lastRun {
+                                return "Failed at \(lastRun.formatted(date: .abbreviated, time: .shortened))"
+                            }
+                            return "Failed with exit code \(exitCode)"
+                        }())
                 } else if let lastRun = task.status.lastRun {
                     Text(lastRun.formatted(date: .abbreviated, time: .shortened))
                         .font(.caption)

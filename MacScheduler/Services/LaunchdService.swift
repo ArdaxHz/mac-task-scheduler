@@ -597,9 +597,11 @@ class LaunchdService: SchedulerService {
     }
 
     /// Shell-quote a string by wrapping in single quotes and escaping embedded single quotes.
+    /// Also strips null bytes which can truncate C strings and split quoted arguments.
     private func shellQuote(_ string: String) -> String {
         if string.isEmpty { return "''" }
-        return "'" + string.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let sanitized = string.replacingOccurrences(of: "\0", with: "")
+        return "'" + sanitized.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
     private func formatLabelAsName(_ label: String) -> String {

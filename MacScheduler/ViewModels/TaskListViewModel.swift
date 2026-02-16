@@ -205,6 +205,23 @@ class TaskListViewModel: ObservableObject {
                     }
                     allTasks[i].status.failureCount = taskHistory.filter { !$0.success }.count
                 }
+
+                // For tasks with no app-recorded lastResult, synthesize one from log files
+                if allTasks[i].status.lastResult == nil, let lastRun = allTasks[i].status.lastRun {
+                    let stdout = Self.readLogFile(allTasks[i].standardOutPath)
+                    let stderr = Self.readLogFile(allTasks[i].standardErrorPath)
+                    if stdout != nil || stderr != nil {
+                        let exitCode = allTasks[i].status.lastExitStatus ?? 0
+                        allTasks[i].status.lastResult = TaskExecutionResult(
+                            taskId: allTasks[i].id,
+                            startTime: lastRun,
+                            endTime: lastRun,
+                            exitCode: exitCode,
+                            standardOutput: stdout ?? "",
+                            standardError: stderr ?? ""
+                        )
+                    }
+                }
             }
 
             allTasks.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -411,6 +428,28 @@ class TaskListViewModel: ObservableObject {
     func refreshTaskStatus(_ task: ScheduledTask) async {
         // Just re-discover everything for consistency
         await discoverAllTasks()
+    }
+
+    /// Read the tail of a log file, returning nil if the file doesn't exist or is empty.
+    /// Caps at 10K chars to match history truncation limits.
+    private static func readLogFile(_ path: String?, maxBytes: Int = 10_000) -> String? {
+        guard let path = path, !path.isEmpty,
+              FileManager.default.fileExists(atPath: path),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let fileSize = attrs[.size] as? UInt64,
+              fileSize > 0 else {
+            return nil
+        }
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { handle.closeFile() }
+
+        let readSize = min(UInt64(maxBytes), fileSize)
+        if fileSize > readSize {
+            handle.seek(toFileOffset: fileSize - readSize)
+        }
+        let data = handle.readData(ofLength: Int(readSize))
+        guard let content = String(data: data, encoding: .utf8), !content.isEmpty else { return nil }
+        return content
     }
 
     private func showError(message: String) {

@@ -237,14 +237,18 @@ class TaskEditorViewModel: ObservableObject {
         // Must be an existing file (don't create new files in arbitrary locations)
         guard FileManager.default.fileExists(atPath: expandedPath) else { return false }
 
-        // Block writing to system directories
+        // Resolve symlinks to prevent symlink attacks pointing to system files
+        let resolvedPath = URL(fileURLWithPath: expandedPath).resolvingSymlinksInPath().path
+
+        // Block writing to system directories (check both original and resolved paths)
         let blockedPrefixes = ["/System", "/usr", "/bin", "/sbin", "/Library", "/private/var", "/etc"]
         for prefix in blockedPrefixes {
             if expandedPath.hasPrefix(prefix) { return false }
+            if resolvedPath.hasPrefix(prefix) { return false }
         }
 
-        // Block dotfiles (e.g. .bashrc, .zshrc, .ssh/config)
-        let components = expandedPath.components(separatedBy: "/")
+        // Block dotfiles (e.g. .bashrc, .zshrc, .ssh/config) — check resolved path too
+        let components = resolvedPath.components(separatedBy: "/")
         for component in components where component.hasPrefix(".") && component != "." && component != ".." {
             return false
         }
@@ -417,10 +421,11 @@ class TaskEditorViewModel: ObservableObject {
         // Resolve symlinks to prevent symlink attacks
         let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
 
-        // Block system-critical directories
+        // Block system-critical directories (check both original and symlink-resolved paths)
         let systemDirs = ["/System", "/usr", "/bin", "/sbin", "/private/var", "/private/etc", "/etc"]
         for dir in systemDirs {
-            if resolved.hasPrefix(dir + "/") || resolved == dir {
+            if expanded.hasPrefix(dir + "/") || expanded == dir ||
+               resolved.hasPrefix(dir + "/") || resolved == dir {
                 validationErrors.append("\(label) must not point to a system directory")
                 return
             }
@@ -452,28 +457,32 @@ class TaskEditorViewModel: ObservableObject {
         try? fm.createDirectory(at: destDir, withIntermediateDirectories: true)
 
         let fileName = (sourcePath as NSString).lastPathComponent
-        var destPath = destDir.appendingPathComponent(fileName).path
+        let baseName = (fileName as NSString).deletingPathExtension
+        let ext = (fileName as NSString).pathExtension
 
-        // Handle name collision
-        if fm.fileExists(atPath: destPath) {
-            let baseName = (fileName as NSString).deletingPathExtension
-            let ext = (fileName as NSString).pathExtension
-            var counter = 1
-            repeat {
-                let newName = ext.isEmpty ? "\(baseName)_\(counter)" : "\(baseName)_\(counter).\(ext)"
-                destPath = destDir.appendingPathComponent(newName).path
-                counter += 1
-            } while fm.fileExists(atPath: destPath)
-        }
+        // Try up to 100 names to avoid TOCTOU race between fileExists check and copyItem
+        for counter in 0..<100 {
+            let destName: String
+            if counter == 0 {
+                destName = fileName
+            } else {
+                destName = ext.isEmpty ? "\(baseName)_\(counter)" : "\(baseName)_\(counter).\(ext)"
+            }
+            let destPath = destDir.appendingPathComponent(destName).path
 
-        do {
-            try fm.copyItem(atPath: sourcePath, toPath: destPath)
-            // Make executable
-            try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destPath)
-            return destPath
-        } catch {
-            return nil
+            do {
+                try fm.copyItem(atPath: sourcePath, toPath: destPath)
+                // Make executable
+                try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: destPath)
+                return destPath
+            } catch CocoaError.fileWriteFileExists {
+                // Name collision — try next counter
+                continue
+            } catch {
+                return nil
+            }
         }
+        return nil
     }
 
     /// Resolve the script file path from a task's action (shell binary + arguments pattern).
@@ -610,15 +619,21 @@ class TaskEditorViewModel: ObservableObject {
         var trigger: TaskTrigger
         switch triggerType {
         case .calendar:
+            // Clamp schedule values to valid bounds as defense-in-depth
+            let clampedMinute = min(max(scheduleMinute, 0), 59)
+            let clampedHour = min(max(scheduleHour, 0), 23)
+            let clampedDay = scheduleDay.map { min(max($0, 1), 31) }
+            let clampedWeekday = scheduleWeekday.map { min(max($0, 0), 6) }
+            let clampedMonth = scheduleMonth.map { min(max($0, 1), 12) }
             trigger = TaskTrigger(
                 id: editingTask?.trigger.id ?? UUID(),
                 type: .calendar,
                 calendarSchedule: CalendarSchedule(
-                    minute: scheduleMinute,
-                    hour: scheduleHour,
-                    day: scheduleDay,
-                    weekday: scheduleWeekday,
-                    month: scheduleMonth
+                    minute: clampedMinute,
+                    hour: clampedHour,
+                    day: clampedDay,
+                    weekday: clampedWeekday,
+                    month: clampedMonth
                 )
             )
         case .interval:
@@ -655,7 +670,7 @@ class TaskEditorViewModel: ObservableObject {
             isReadOnly: editingTask?.isReadOnly ?? false,
             plistFilePath: editingTask?.plistFilePath,
             location: location,
-            userName: userName.isEmpty ? nil : userName
+            userName: userName.isEmpty ? nil : Self.sanitizeNameField(userName)
         )
     }
 }

@@ -160,6 +160,19 @@ struct ScriptEditorView: View {
         }
     }
 
+    /// Strip null bytes and dangerous Unicode from script content before saving.
+    private static func sanitizeScript(_ string: String) -> String {
+        string.unicodeScalars.filter { scalar in
+            // Remove null bytes
+            guard scalar.value != 0 else { return false }
+            // Allow all printable ASCII + tab, newline, carriage return
+            if scalar.isASCII {
+                return scalar.value >= 32 || scalar.value == 10 || scalar.value == 9 || scalar.value == 13
+            }
+            return true
+        }.map { String($0) }.joined()
+    }
+
     private func saveScript() {
         // Validate the path is safe before writing
         guard TaskEditorViewModel.isSafeScriptWritePath(scriptPath) else {
@@ -169,8 +182,10 @@ struct ScriptEditorView: View {
         }
 
         do {
-            try scriptContent.write(toFile: scriptPath, atomically: true, encoding: .utf8)
-            originalContent = scriptContent
+            let sanitized = Self.sanitizeScript(scriptContent)
+            try sanitized.write(toFile: scriptPath, atomically: true, encoding: .utf8)
+            scriptContent = sanitized
+            originalContent = sanitized
             hasChanges = false
         } catch {
             errorMessage = error.localizedDescription
