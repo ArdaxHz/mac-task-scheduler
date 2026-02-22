@@ -452,7 +452,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = "1.6.0";
+				MARKETING_VERSION = "0.6.0-alpha";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mactaskscheduler.app;
 				PRODUCT_NAME = "Mac Task Scheduler";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -479,7 +479,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = "1.6.0";
+				MARKETING_VERSION = "0.6.0-alpha";
 				PRODUCT_BUNDLE_IDENTIFIER = com.mactaskscheduler.app;
 				PRODUCT_NAME = "Mac Task Scheduler";
 				SWIFT_EMIT_LOC_STRINGS = YES;

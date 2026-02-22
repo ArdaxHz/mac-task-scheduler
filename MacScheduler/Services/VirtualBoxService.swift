@@ -24,6 +24,11 @@ class VirtualBoxService: SchedulerService {
         vboxManagePaths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    /// Validate that the VM ID is a valid UUID (defense-in-depth).
+    private func validateVMId(_ vmId: String) -> Bool {
+        UUID(uuidString: vmId) != nil && !vmId.contains("\0")
+    }
+
     // MARK: - SchedulerService Protocol
 
     func install(task: ScheduledTask) async throws {
@@ -38,8 +43,8 @@ class VirtualBoxService: SchedulerService {
         guard let vboxManage = vboxManagePath else {
             throw SchedulerError.vmNotAvailable("VBoxManage not found")
         }
-        guard let info = task.vmInfo else {
-            throw SchedulerError.invalidTask("Not a VirtualBox VM")
+        guard let info = task.vmInfo, validateVMId(info.vmId) else {
+            throw SchedulerError.invalidTask("Not a valid VirtualBox VM")
         }
         let result = try await shellExecutor.execute(
             command: vboxManage,
@@ -55,8 +60,8 @@ class VirtualBoxService: SchedulerService {
         guard let vboxManage = vboxManagePath else {
             throw SchedulerError.vmNotAvailable("VBoxManage not found")
         }
-        guard let info = task.vmInfo else {
-            throw SchedulerError.invalidTask("Not a VirtualBox VM")
+        guard let info = task.vmInfo, validateVMId(info.vmId) else {
+            throw SchedulerError.invalidTask("Not a valid VirtualBox VM")
         }
         let result = try await shellExecutor.execute(
             command: vboxManage,
@@ -181,14 +186,20 @@ class VirtualBoxService: SchedulerService {
         let lines = output.components(separatedBy: "\n").filter { !$0.isEmpty }
         return lines.compactMap { line in
             // Format: "VM Name" {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
+            // Verify line starts with a quote
+            guard line.first == "\"" else { return nil }
             guard let nameEnd = line.firstIndex(of: "\"", offsetBy: 1),
                   let braceStart = line.firstIndex(of: "{"),
-                  let braceEnd = line.firstIndex(of: "}") else {
+                  let braceEnd = line.firstIndex(of: "}"),
+                  braceStart < braceEnd else {
                 return nil
             }
             let nameStart = line.index(after: line.startIndex)
+            guard nameStart < nameEnd else { return nil }
             let name = String(line[nameStart..<nameEnd])
-            let uuid = String(line[line.index(after: braceStart)..<braceEnd])
+            let uuidStart = line.index(after: braceStart)
+            guard uuidStart < braceEnd else { return nil }
+            let uuid = String(line[uuidStart..<braceEnd])
             return (name, uuid)
         }
     }

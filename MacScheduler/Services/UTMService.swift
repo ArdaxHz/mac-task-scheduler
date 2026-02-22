@@ -24,6 +24,11 @@ class UTMService: SchedulerService {
         utmctlPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    /// Validate that the VM ID is a valid UUID (defense-in-depth).
+    private func validateVMId(_ vmId: String) -> Bool {
+        UUID(uuidString: vmId) != nil && !vmId.contains("\0")
+    }
+
     // MARK: - SchedulerService Protocol
 
     func install(task: ScheduledTask) async throws {
@@ -38,8 +43,8 @@ class UTMService: SchedulerService {
         guard let utmctl = utmctlPath else {
             throw SchedulerError.vmNotAvailable("utmctl not found")
         }
-        guard let info = task.vmInfo else {
-            throw SchedulerError.invalidTask("Not a UTM VM")
+        guard let info = task.vmInfo, validateVMId(info.vmId) else {
+            throw SchedulerError.invalidTask("Not a valid UTM VM")
         }
         let result = try await shellExecutor.execute(
             command: utmctl,
@@ -55,8 +60,8 @@ class UTMService: SchedulerService {
         guard let utmctl = utmctlPath else {
             throw SchedulerError.vmNotAvailable("utmctl not found")
         }
-        guard let info = task.vmInfo else {
-            throw SchedulerError.invalidTask("Not a UTM VM")
+        guard let info = task.vmInfo, validateVMId(info.vmId) else {
+            throw SchedulerError.invalidTask("Not a valid UTM VM")
         }
         let result = try await shellExecutor.execute(
             command: utmctl,

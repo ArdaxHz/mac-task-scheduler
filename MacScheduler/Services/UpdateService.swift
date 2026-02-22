@@ -95,7 +95,15 @@ actor UpdateService {
         return cleaned.split(separator: ".").compactMap { Int($0) }
     }
 
+    /// Check whether a version string contains a pre-release suffix (e.g. "-alpha", "-beta").
+    private func hasPreRelease(_ version: String) -> Bool {
+        let cleaned = version.replacingOccurrences(of: "\"", with: "")
+        return cleaned.contains("-")
+    }
+
     /// Compare semver strings. Returns true if remote is newer than current.
+    /// When numeric parts are equal, a stable release is newer than a pre-release
+    /// (e.g. "0.6.0" > "0.6.0-alpha").
     private func isNewer(remote: String, current: String) -> Bool {
         let remoteParts = parseVersion(remote)
         let currentParts = parseVersion(current)
@@ -106,6 +114,12 @@ actor UpdateService {
             if r > c { return true }
             if r < c { return false }
         }
+
+        // Numeric parts are equal — stable beats pre-release
+        if hasPreRelease(current) && !hasPreRelease(remote) {
+            return true
+        }
+
         return false
     }
 }

@@ -24,6 +24,11 @@ class ParallelsService: SchedulerService {
         prlctlPaths.first { FileManager.default.isExecutableFile(atPath: $0) }
     }
 
+    /// Validate that the VM ID is a valid UUID (defense-in-depth).
+    private func validateVMId(_ vmId: String) -> Bool {
+        UUID(uuidString: vmId) != nil && !vmId.contains("\0")
+    }
+
     // MARK: - SchedulerService Protocol
 
     func install(task: ScheduledTask) async throws {
@@ -38,8 +43,8 @@ class ParallelsService: SchedulerService {
         guard let prlctl = prlctlPath else {
             throw SchedulerError.vmNotAvailable("prlctl not found")
         }
-        guard let info = task.vmInfo else {
-            throw SchedulerError.invalidTask("Not a Parallels VM")
+        guard let info = task.vmInfo, validateVMId(info.vmId) else {
+            throw SchedulerError.invalidTask("Not a valid Parallels VM")
         }
         let result = try await shellExecutor.execute(
             command: prlctl,
@@ -55,8 +60,8 @@ class ParallelsService: SchedulerService {
         guard let prlctl = prlctlPath else {
             throw SchedulerError.vmNotAvailable("prlctl not found")
         }
-        guard let info = task.vmInfo else {
-            throw SchedulerError.invalidTask("Not a Parallels VM")
+        guard let info = task.vmInfo, validateVMId(info.vmId) else {
+            throw SchedulerError.invalidTask("Not a valid Parallels VM")
         }
         let result = try await shellExecutor.execute(
             command: prlctl,

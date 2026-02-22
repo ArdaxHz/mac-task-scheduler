@@ -198,9 +198,13 @@ class VMwareFusionService: SchedulerService {
 
     // MARK: - Helpers
 
-    /// Parse displayName from .vmx file.
+    /// Parse displayName from .vmx file (bounded to 256 KB to avoid memory issues on large files).
     private func parseDisplayName(from vmxPath: String) -> String? {
-        guard let contents = try? String(contentsOfFile: vmxPath, encoding: .utf8) else { return nil }
+        guard let handle = FileHandle(forReadingAtPath: vmxPath) else { return nil }
+        defer { handle.closeFile() }
+        let maxBytes = 256 * 1024 // 256 KB — .vmx files are typically < 10 KB
+        let data = handle.readData(ofLength: maxBytes)
+        guard let contents = String(data: data, encoding: .utf8) else { return nil }
         for line in contents.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("displayName") {

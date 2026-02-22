@@ -6,13 +6,23 @@
 //
 
 import Foundation
+import os
 
 class DockerService: SchedulerService {
     static let shared = DockerService()
     let backend: SchedulerBackend = .docker
 
     /// Whether Docker was reachable on the last discovery attempt.
-    private(set) var isDockerOnline: Bool = false
+    /// Thread-safe via lock — written in discoverTasks(), read from MainActor.
+    var isDockerOnline: Bool {
+        _onlineLock.withLock { _isDockerOnline }
+    }
+    private var _isDockerOnline: Bool = false
+    private let _onlineLock = OSAllocatedUnfairLock()
+
+    private func setDockerOnline(_ value: Bool) {
+        _onlineLock.withLock { _isDockerOnline = value }
+    }
 
     private let shellExecutor = ShellExecutor.shared
 
@@ -385,8 +395,8 @@ class DockerService: SchedulerService {
         guard let docker = dockerPath else {
             throw SchedulerError.dockerNotAvailable("Docker CLI not found")
         }
-        guard !projectName.isEmpty else {
-            throw SchedulerError.invalidTask("No Compose project name")
+        guard !projectName.isEmpty, !Self.hasNullBytes(projectName) else {
+            throw SchedulerError.invalidTask("Invalid Compose project name")
         }
 
         var args = ["compose", "-p", projectName, "down"]
@@ -417,14 +427,14 @@ class DockerService: SchedulerService {
 
     func discoverTasks() async throws -> [ScheduledTask] {
         guard let docker = dockerPath else {
-            isDockerOnline = false
+            setDockerOnline(false)
             return await DockerCacheService.shared.load()
         }
         guard await isDockerAvailable() else {
-            isDockerOnline = false
+            setDockerOnline(false)
             return await DockerCacheService.shared.load()
         }
-        isDockerOnline = true
+        setDockerOnline(true)
 
         let runtime = detectRuntime()
 
@@ -661,8 +671,8 @@ class DockerService: SchedulerService {
         guard let docker = dockerPath else {
             throw SchedulerError.dockerNotAvailable("Docker CLI not found")
         }
-        guard !projectName.isEmpty else {
-            throw SchedulerError.invalidTask("No Compose project name")
+        guard !projectName.isEmpty, !Self.hasNullBytes(projectName) else {
+            throw SchedulerError.invalidTask("Invalid Compose project name")
         }
         let result = try await shellExecutor.execute(
             command: docker,
@@ -683,8 +693,13 @@ class DockerService: SchedulerService {
         guard !volumeNames.isEmpty else {
             throw SchedulerError.invalidTask("No volume names provided")
         }
+        // Filter out volume names with null bytes
+        let safeNames = volumeNames.filter { !Self.hasNullBytes($0) && !$0.isEmpty }
+        guard !safeNames.isEmpty else {
+            throw SchedulerError.invalidTask("No valid volume names provided")
+        }
         var args = ["volume", "inspect"]
-        args.append(contentsOf: volumeNames)
+        args.append(contentsOf: safeNames)
         let result = try await shellExecutor.execute(
             command: docker,
             arguments: args,
@@ -768,16 +783,26 @@ class DockerService: SchedulerService {
         return result.sorted()
     }
 
+    // Cached date formatters to avoid repeated allocation during discovery
+    private static let dockerDateFormatterFractional: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return f
+    }()
+
+    private static let dockerDateFormatterBasic: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter()
+        f.formatOptions = [.withInternetDateTime]
+        return f
+    }()
+
     private func parseDockerDate(_ dateString: String) -> Date? {
         // Docker uses ISO 8601 with nanoseconds: 2024-01-15T10:30:00.123456789Z
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: dateString) {
+        if let date = Self.dockerDateFormatterFractional.date(from: dateString) {
             return date
         }
         // Fallback without fractional seconds
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: dateString)
+        return Self.dockerDateFormatterBasic.date(from: dateString)
     }
 }
 

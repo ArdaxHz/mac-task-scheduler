@@ -32,11 +32,12 @@ actor DockerCacheService {
 
     /// Save discovered Docker tasks to the cache file.
     func save(tasks: [ScheduledTask]) {
-        let containers = Array(tasks.prefix(maxCachedContainers)).map { task in
-            CachedContainer(
+        let containers = Array(tasks.prefix(maxCachedContainers)).compactMap { task -> CachedContainer? in
+            guard let info = task.containerInfo else { return nil }
+            return CachedContainer(
                 name: task.name,
                 label: task.launchdLabel,
-                containerInfo: task.containerInfo!,
+                containerInfo: info,
                 statusState: task.status.state.rawValue,
                 createdAt: task.createdAt
             )
@@ -76,16 +77,18 @@ actor DockerCacheService {
 
     // MARK: - Persistence
 
-    private var cacheFileURL: URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+    private var cacheFileURL: URL? {
+        guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
         let dir = appSupport.appendingPathComponent("MacScheduler")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("docker-cache.json")
     }
 
     private func loadFromDisk() -> [CachedContainer] {
-        let url = cacheFileURL
-        guard FileManager.default.fileExists(atPath: url.path) else { return [] }
+        guard let url = cacheFileURL,
+              FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
             let data = try Data(contentsOf: url)
             let decoder = JSONDecoder()
@@ -97,12 +100,18 @@ actor DockerCacheService {
     }
 
     private func writeToDisk(_ containers: [CachedContainer]) {
+        guard let url = cacheFileURL else { return }
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = .prettyPrinted
             let data = try encoder.encode(containers)
-            try data.write(to: cacheFileURL, options: .atomic)
+            try data.write(to: url, options: .atomic)
+            // Set restrictive permissions — cache may contain env var secrets
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: url.path
+            )
         } catch {
             // Non-fatal: cache write failure doesn't affect app operation
         }
