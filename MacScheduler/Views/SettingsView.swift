@@ -201,14 +201,30 @@ struct SettingsView: View {
                         .font(.subheadline)
                         .foregroundColor(.secondary)
 
-                    Button {
-                        if let url = URL(string: "https://github.com/ArdaxHz/mac-task-scheduler") {
-                            NSWorkspace.shared.open(url)
+                    HStack(spacing: 16) {
+                        Button {
+                            if let url = URL(string: "https://ardax.dev") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            Label("ardax.dev", systemImage: "globe")
                         }
-                    } label: {
-                        Label("GitHub Repository", systemImage: "link")
+                        .buttonStyle(.link)
+
+                        Button {
+                            if let url = URL(string: "https://github.com/ArdaxHz/mac-scheduler") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        } label: {
+                            Label("GitHub", systemImage: "link")
+                        }
+                        .buttonStyle(.link)
                     }
-                    .buttonStyle(.link)
+
+                    Text("If you find this app useful, consider supporting the author.")
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .multilineTextAlignment(.center)
                 }
                 .frame(maxWidth: .infinity)
                 .padding(.vertical, 8)

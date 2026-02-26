@@ -42,6 +42,12 @@ struct MainView: View {
     @State private var dragPreviewWidth: CGFloat?
     @State private var showUpdateAlert = false
     @State private var availableUpdate: UpdateService.Release?
+    @State private var showDeleteConfirmation = false
+    @State private var showDeleteNameConfirmation = false
+    @State private var deleteNameInput = ""
+    @State private var taskToDelete: ScheduledTask?
+    @State private var showEditConfirmation = false
+    @State private var taskToEdit: ScheduledTask?
 
     private let minDetailWidth: CGFloat = 280
     private let maxDetailWidth: CGFloat = 600
@@ -125,6 +131,75 @@ struct MainView: View {
         .onReceive(NotificationCenter.default.publisher(for: .createNewTask)) { _ in
             activeSheet = .newTask
         }
+        .onReceive(NotificationCenter.default.publisher(for: .refreshAllTasks)) { _ in
+            Task { await viewModel.refreshAll() }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleDetailPanel)) { _ in
+            withAnimation(.easeInOut(duration: 0.2)) {
+                showDetailPanel.toggle()
+                if showDetailPanel && detailPanelWidth < minDetailWidth {
+                    detailPanelWidth = 350
+                }
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .editSelectedTask)) { _ in
+            guard let task = viewModel.selectedTask, !task.isReadOnly else { return }
+            confirmEdit(task)
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .runSelectedTask)) { _ in
+            guard let task = viewModel.selectedTask, !task.isReadOnly, !task.isStale else { return }
+            Task { await viewModel.runTaskNow(task) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .toggleSelectedTask)) { _ in
+            guard let task = viewModel.selectedTask, !task.isReadOnly, !task.isStale else { return }
+            Task { await viewModel.toggleTaskEnabled(task) }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .deleteSelectedTask)) { _ in
+            guard let task = viewModel.selectedTask, !task.isReadOnly else { return }
+            taskToDelete = task
+            showDeleteConfirmation = true
+        }
+        .confirmationDialog("Delete Task", isPresented: $showDeleteConfirmation) {
+            Button("Continue with Deletion", role: .destructive) {
+                deleteNameInput = ""
+                showDeleteNameConfirmation = true
+            }
+            Button("Cancel", role: .cancel) {
+                taskToDelete = nil
+            }
+        } message: {
+            Text("Are you sure you want to delete \"\(taskToDelete?.name ?? "this task")\"? This cannot be undone.")
+        }
+        .sheet(isPresented: $showDeleteNameConfirmation) {
+            DeleteConfirmationSheet(
+                taskName: taskToDelete?.name ?? "",
+                nameInput: $deleteNameInput,
+                onDelete: {
+                    if let task = taskToDelete {
+                        Task { await viewModel.deleteTask(task) }
+                    }
+                    taskToDelete = nil
+                    showDeleteNameConfirmation = false
+                },
+                onCancel: {
+                    taskToDelete = nil
+                    showDeleteNameConfirmation = false
+                }
+            )
+        }
+        .alert("Edit Task", isPresented: $showEditConfirmation) {
+            Button("Edit", role: .destructive) {
+                if let task = taskToEdit {
+                    openEditor(for: task)
+                }
+                taskToEdit = nil
+            }
+            Button("Cancel", role: .cancel) {
+                taskToEdit = nil
+            }
+        } message: {
+            Text("Editing \"\(taskToEdit?.name ?? "this task")\" will overwrite its current configuration. This cannot be undone.")
+        }
         .alert("Error", isPresented: $viewModel.showError) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -207,10 +282,8 @@ struct MainView: View {
                     if task.backend.isVM {
                         // VM tasks are read-only — no editor
                         viewModel.selectedTask = task
-                    } else if task.backend == .docker {
-                        activeSheet = .editDockerContainer(task)
                     } else {
-                        activeSheet = .editTask(task)
+                        confirmEdit(task)
                     }
                 },
                 onSelect: { task in
@@ -287,11 +360,7 @@ struct MainView: View {
             TaskDetailView(
                 task: task,
                 onEdit: { editedTask in
-                    if editedTask.backend == .docker {
-                        activeSheet = .editDockerContainer(editedTask)
-                    } else {
-                        activeSheet = .editTask(editedTask)
-                    }
+                    confirmEdit(editedTask)
                 },
                 onRemoveDocker: { removeTask in
                     activeSheet = .removeDockerContainer(removeTask)
@@ -304,6 +373,99 @@ struct MainView: View {
                 Text("Select a task from the list to view its details")
             }
         }
+    }
+
+    // MARK: - Edit / Delete Helpers
+
+    private func confirmEdit(_ task: ScheduledTask) {
+        taskToEdit = task
+        showEditConfirmation = true
+    }
+
+    private func openEditor(for task: ScheduledTask) {
+        if task.backend == .docker {
+            activeSheet = .editDockerContainer(task)
+        } else {
+            activeSheet = .editTask(task)
+        }
+    }
+}
+
+// MARK: - Delete Confirmation Sheet (Step 2)
+
+private struct DeleteConfirmationSheet: View {
+    let taskName: String
+    @Binding var nameInput: String
+    let onDelete: () -> Void
+    let onCancel: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    private var nameMatches: Bool {
+        nameInput == taskName
+    }
+
+    /// Strip null bytes and control characters from user input.
+    private static func sanitizeInput(_ input: String) -> String {
+        input.unicodeScalars.filter { scalar in
+            guard scalar.value != 0 else { return false }
+            if scalar.isASCII {
+                return scalar.value >= 32 || scalar.value == 9 // printable + tab
+            }
+            return true
+        }.map { String($0) }.joined()
+    }
+
+    var body: some View {
+        VStack(spacing: 16) {
+            Image(systemName: "exclamationmark.triangle.fill")
+                .font(.system(size: 36))
+                .foregroundColor(.red)
+
+            Text("Confirm Deletion")
+                .font(.headline)
+
+            Text("Type the task name to confirm deletion:")
+                .font(.subheadline)
+                .foregroundColor(.secondary)
+
+            Text(taskName)
+                .font(.system(.body, design: .monospaced))
+                .fontWeight(.semibold)
+                .textSelection(.enabled)
+                .padding(8)
+                .background(Color(.textBackgroundColor))
+                .cornerRadius(6)
+
+            TextField("Enter task name", text: $nameInput)
+                .textFieldStyle(.roundedBorder)
+                .focused($isFocused)
+                .onChange(of: nameInput) { _, newValue in
+                    let sanitized = Self.sanitizeInput(newValue)
+                    if sanitized != newValue {
+                        nameInput = sanitized
+                    }
+                }
+                .onSubmit {
+                    if nameMatches { onDelete() }
+                }
+
+            HStack(spacing: 12) {
+                Button("Cancel", role: .cancel) {
+                    onCancel()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button("Delete", role: .destructive) {
+                    onDelete()
+                }
+                .disabled(!nameMatches)
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(24)
+        .frame(width: 380)
+        .onAppear { isFocused = true }
     }
 }
 
