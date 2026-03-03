@@ -90,17 +90,58 @@ jobs:
             "$RUNNER_TEMP/MacTaskScheduler.dmg"
 
       - name: Notarize DMG
+        timeout-minutes: 20
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_ID_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           echo "Submitting for notarization..."
-          xcrun notarytool submit "$RUNNER_TEMP/MacTaskScheduler.dmg" \
+          SUBMIT_OUTPUT=$(xcrun notarytool submit "$RUNNER_TEMP/MacTaskScheduler.dmg" \
             --apple-id "$APPLE_ID" \
             --password "$APPLE_ID_PASSWORD" \
             --team-id "$APPLE_TEAM_ID" \
-            --wait
+            --output-format json 2>&1) || true
+
+          SUBMISSION_ID=$(echo "$SUBMIT_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('id',''))" 2>/dev/null)
+
+          if [ -z "$SUBMISSION_ID" ]; then
+            echo "Failed to get submission ID. Output:"
+            echo "$SUBMIT_OUTPUT"
+            exit 1
+          fi
+
+          echo "Submission ID: $SUBMISSION_ID"
+          echo "Waiting for notarization to complete..."
+
+          for i in $(seq 1 30); do
+            sleep 30
+            STATUS_OUTPUT=$(xcrun notarytool info "$SUBMISSION_ID" \
+              --apple-id "$APPLE_ID" \
+              --password "$APPLE_ID_PASSWORD" \
+              --team-id "$APPLE_TEAM_ID" \
+              --output-format json 2>&1) || continue
+
+            STATUS=$(echo "$STATUS_OUTPUT" | python3 -c "import sys,json; print(json.load(sys.stdin).get('status',''))" 2>/dev/null)
+            echo "Attempt $i: status=$STATUS"
+
+            if [ "$STATUS" = "Accepted" ]; then
+              echo "Notarization accepted!"
+              break
+            elif [ "$STATUS" = "Invalid" ] || [ "$STATUS" = "Rejected" ]; then
+              echo "Notarization failed with status: $STATUS"
+              xcrun notarytool log "$SUBMISSION_ID" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_ID_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" || true
+              exit 1
+            fi
+          done
+
+          if [ "$STATUS" != "Accepted" ]; then
+            echo "Notarization timed out (status: $STATUS)"
+            exit 1
+          fi
 
           echo "Stapling notarization ticket..."
           xcrun stapler staple "$RUNNER_TEMP/MacTaskScheduler.dmg"
