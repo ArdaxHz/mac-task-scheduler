@@ -59,7 +59,7 @@ struct TaskListView: View {
                     Button {
                         onAdd()
                     } label: {
-                        Label("New Task", systemImage: "gear.badge.plus")
+                        Label("New Task", systemImage: "plus.circle")
                     }
 
                     Button {

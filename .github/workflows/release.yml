@@ -73,7 +73,7 @@ jobs:
 
           codesign --force --deep \
             --sign "Developer ID Application: Ardax H (Z8QHFH52KV)" \
-            --entitlements MacTaskScheduler/MacTaskScheduler.entitlements \
+            --entitlements MacTaskScheduler/MacTaskScheduler.distribution.entitlements \
             --options runtime \
             "$RUNNER_TEMP/export/Mac Task Scheduler.app"
 

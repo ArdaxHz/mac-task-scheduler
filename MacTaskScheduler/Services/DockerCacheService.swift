@@ -12,10 +12,10 @@ actor DockerCacheService {
 
     private let maxCachedContainers = 1000
 
-    private var cachedTasks: [CachedContainer] = []
+    private var cachedTasks: [CachedContainer]
 
     private init() {
-        cachedTasks = loadFromDisk()
+        cachedTasks = Self.loadCacheFromDisk()
     }
 
     // MARK: - Types
@@ -77,7 +77,7 @@ actor DockerCacheService {
 
     // MARK: - Persistence
 
-    private nonisolated var cacheFileURL: URL? {
+    private static var cacheFileURL: URL? {
         guard let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
         }
@@ -86,7 +86,7 @@ actor DockerCacheService {
         return dir.appendingPathComponent("docker-cache.json")
     }
 
-    private nonisolated func loadFromDisk() -> [CachedContainer] {
+    private static func loadCacheFromDisk() -> [CachedContainer] {
         guard let url = cacheFileURL,
               FileManager.default.fileExists(atPath: url.path) else { return [] }
         do {
@@ -100,7 +100,7 @@ actor DockerCacheService {
     }
 
     private func writeToDisk(_ containers: [CachedContainer]) {
-        guard let url = cacheFileURL else { return }
+        guard let url = Self.cacheFileURL else { return }
         do {
             let encoder = JSONEncoder()
             encoder.dateEncodingStrategy = .iso8601
