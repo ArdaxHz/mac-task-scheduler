@@ -54,7 +54,16 @@ jobs:
 
           rm -f "$CERT_P12"
 
-      - name: Build archive
+      - name: Prepare export options
+        env:
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          sed "s/__TEAM_ID__/$APPLE_TEAM_ID/" ExportOptions.plist > "$RUNNER_TEMP/ExportOptions.plist"
+
+      - name: Archive
+        env:
+          SIGNING_IDENTITY: ${{ secrets.SIGNING_IDENTITY }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           xcodebuild archive \
             -project MacTaskScheduler.xcodeproj \
@@ -62,23 +71,25 @@ jobs:
             -configuration Release \
             -destination 'generic/platform=macOS' \
             -archivePath $RUNNER_TEMP/MacTaskScheduler.xcarchive \
-            CODE_SIGN_IDENTITY="Developer ID Application: Ardax H (Z8QHFH52KV)" \
+            CODE_SIGN_IDENTITY="$SIGNING_IDENTITY" \
             CODE_SIGN_STYLE=Manual \
-            DEVELOPMENT_TEAM=Z8QHFH52KV
+            DEVELOPMENT_TEAM="$APPLE_TEAM_ID"
 
-      - name: Export and sign app
+      - name: Export archive
         run: |
-          mkdir -p $RUNNER_TEMP/export
-          cp -R $RUNNER_TEMP/MacTaskScheduler.xcarchive/Products/Applications/*.app $RUNNER_TEMP/export/
+          xcodebuild -exportArchive \
+            -archivePath $RUNNER_TEMP/MacTaskScheduler.xcarchive \
+            -exportPath $RUNNER_TEMP/export \
+            -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist"
 
-          codesign --force --deep \
-            --sign "Developer ID Application: Ardax H (Z8QHFH52KV)" \
-            --entitlements MacTaskScheduler/MacTaskScheduler.distribution.entitlements \
-            --options runtime \
-            "$RUNNER_TEMP/export/Mac Task Scheduler.app"
+          echo "Exported contents:"
+          ls -la "$RUNNER_TEMP/export/"
 
           echo "Verifying signature..."
           codesign --verify --verbose=2 "$RUNNER_TEMP/export/Mac Task Scheduler.app"
+
+          echo "Entitlements:"
+          codesign -d --entitlements - "$RUNNER_TEMP/export/Mac Task Scheduler.app"
 
       - name: Create DMG
         run: |
