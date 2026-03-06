@@ -93,10 +93,13 @@ jobs:
 
       - name: Create DMG
         run: |
-          xattr -cr "$RUNNER_TEMP/export/Mac Task Scheduler.app"
+          # Stage only the .app for the DMG
+          mkdir -p "$RUNNER_TEMP/dmg-stage"
+          cp -R "$RUNNER_TEMP/export/Mac Task Scheduler.app" "$RUNNER_TEMP/dmg-stage/"
+          xattr -cr "$RUNNER_TEMP/dmg-stage/Mac Task Scheduler.app"
 
           hdiutil create -volname "Mac Task Scheduler" \
-            -srcfolder "$RUNNER_TEMP/export" \
+            -srcfolder "$RUNNER_TEMP/dmg-stage" \
             -ov -format UDZO \
             "$RUNNER_TEMP/MacTaskScheduler.dmg"
 
