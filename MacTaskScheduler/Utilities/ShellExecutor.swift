@@ -7,6 +7,55 @@
 
 import Foundation
 
+/// POSIX-style word splitting/joining for argument strings shown in text fields
+/// and for parsing crontab commands. No expansion — `$VAR` etc. are kept literally.
+enum ShellWords {
+    /// Split on unquoted spaces/tabs, honouring single quotes, double quotes and backslash escapes.
+    static func split(_ input: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var inWord = false
+        var quote: Character?
+        var chars = Array(input)[...]
+
+        while let c = chars.popFirst() {
+            if quote == "'" {
+                if c == "'" { quote = nil } else { current.append(c) }
+            } else if quote == "\"" {
+                if c == "\"" {
+                    quote = nil
+                } else if c == "\\", let next = chars.first, "\"\\$`".contains(next) {
+                    current.append(chars.removeFirst())
+                } else {
+                    current.append(c)
+                }
+            } else if c == " " || c == "\t" {
+                if inWord { words.append(current); current = ""; inWord = false }
+            } else {
+                inWord = true
+                if c == "'" || c == "\"" {
+                    quote = c
+                } else if c == "\\", let next = chars.popFirst() {
+                    current.append(next)
+                } else {
+                    current.append(c)
+                }
+            }
+        }
+        if inWord { words.append(current) }
+        return words
+    }
+
+    /// Inverse of split: single-quote only the words that need it.
+    static func join(_ words: [String]) -> String {
+        let safe = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_./:=,+@%"))
+        return words.map { word in
+            if !word.isEmpty && word.unicodeScalars.allSatisfy({ safe.contains($0) }) { return word }
+            return "'" + word.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        }.joined(separator: " ")
+    }
+}
+
 struct ShellResult {
     let exitCode: Int32
     let standardOutput: String

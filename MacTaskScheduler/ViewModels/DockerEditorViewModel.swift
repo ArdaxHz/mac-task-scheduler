@@ -62,7 +62,7 @@ class DockerEditorViewModel: ObservableObject {
         containerName = info.containerName
         restartPolicy = info.restartPolicyEnum
         networkMode = info.networkMode ?? ""
-        commandOverride = info.command.joined(separator: " ")
+        commandOverride = ShellWords.join(info.command)
 
         // Parse port mappings from discovery format "containerPort/proto -> hostIp:hostPort"
         // or install format "hostPort:containerPort/proto"
@@ -284,15 +284,8 @@ class DockerEditorViewModel: ObservableObject {
             return "\(host):\(container)"
         }
 
-        // Parse command
-        let cmdParts: [String]
-        if commandOverride.trimmingCharacters(in: .whitespaces).isEmpty {
-            cmdParts = []
-        } else {
-            cmdParts = commandOverride.trimmingCharacters(in: .whitespaces)
-                .components(separatedBy: " ")
-                .filter { !$0.isEmpty }
-        }
+        // Parse command (quote-aware, so `sh -c 'a b'` stays three arguments)
+        let cmdParts = ShellWords.split(commandOverride)
 
         let displayName = trimmedName.isEmpty ? trimmedImage : trimmedName
         let label = "docker.\(trimmedName.isEmpty ? trimmedImage.replacingOccurrences(of: "/", with: "-").replacingOccurrences(of: ":", with: "-") : trimmedName)"
@@ -313,7 +306,8 @@ class DockerEditorViewModel: ObservableObject {
             containerStatus: originalTask?.containerInfo?.containerStatus ?? "",
             environmentVariables: envDict,
             command: cmdParts,
-            entrypoint: originalTask?.containerInfo?.entrypoint,
+            // Keep the original entrypoint only for the same image — a new image brings its own
+            entrypoint: originalTask?.containerInfo?.imageName == trimmedImage ? originalTask?.containerInfo?.entrypoint : nil,
             containerName: trimmedName
         )
 

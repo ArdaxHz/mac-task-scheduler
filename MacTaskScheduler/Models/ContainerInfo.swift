@@ -57,6 +57,8 @@ struct ContainerInfo: Codable, Equatable {
     var command: [String]
     var entrypoint: [String]?
     var containerName: String
+    /// All networks the container is attached to (networkMode is only the primary one).
+    var networks: [String]? = nil
 
     /// Typed accessor for the restart policy string.
     var restartPolicyEnum: DockerRestartPolicy {

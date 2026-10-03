@@ -93,15 +93,19 @@ class LaunchdService: SchedulerService {
         }
     }
 
+    /// Shell command (to run as root) that writes `content` to `path` as a root-owned 0644 file.
+    /// The content is embedded in the command itself: a user-writable temp file could be
+    /// swapped by another process while the admin prompt is open. Base64 is shell/AppleScript-safe.
+    private func elevatedWriteCommand(content: String, to path: String) -> String {
+        let encoded = Data(content.utf8).base64EncodedString()
+        let quotedPath = shellQuote(path)
+        return "echo \(encoded) | /usr/bin/base64 -D > \(quotedPath) && chmod 644 \(quotedPath) && chown root:wheel \(quotedPath)"
+    }
+
     /// Write a file to a path, using elevated privileges if needed.
     private func writeFile(content: String, to path: String, elevated: Bool) async throws {
         if elevated {
-            // Embed the content in the privileged command itself. A user-writable temp file
-            // could be swapped by another process while the admin prompt is open.
-            // Base64's alphabet is shell- and AppleScript-safe.
-            let encoded = Data(content.utf8).base64EncodedString()
-            let quotedPath = shellQuote(path)
-            try await executeElevated(script: "echo \(encoded) | /usr/bin/base64 -D > \(quotedPath) && chmod 644 \(quotedPath) && chown root:wheel \(quotedPath)")
+            try await executeElevated(script: elevatedWriteCommand(content: content, to: path))
         } else {
             try content.write(toFile: path, atomically: true, encoding: .utf8)
         }
@@ -169,7 +173,7 @@ class LaunchdService: SchedulerService {
 
     func enable(task: ScheduledTask) async throws {
         let path = resolvedPlistPath(for: task)
-        let elevated = task.location.requiresElevation
+        let elevated = loadNeedsRoot(task.location)
 
         guard fileManager.fileExists(atPath: path) else {
             try await install(task: task)
@@ -189,7 +193,7 @@ class LaunchdService: SchedulerService {
 
     func disable(task: ScheduledTask) async throws {
         let path = resolvedPlistPath(for: task)
-        let elevated = task.location.requiresElevation
+        let elevated = loadNeedsRoot(task.location)
 
         guard fileManager.fileExists(atPath: path) else {
             return
@@ -201,41 +205,170 @@ class LaunchdService: SchedulerService {
         }
     }
 
-    /// Robust update: unload old label, delete old plist, write new plist, load new.
+    /// Daemons live in the system domain and must be (un)loaded as root. Agents — including
+    /// those in /Library/LaunchAgents — are loaded as the user; loading them as root would
+    /// register them in the system domain as root jobs.
+    private func loadNeedsRoot(_ location: TaskLocation) -> Bool {
+        location == .systemDaemon
+    }
+
+    /// launchctl service target for a label, e.g. "system/com.x" or "gui/501/com.x".
+    private func serviceTarget(label: String, location: TaskLocation) -> String {
+        location == .systemDaemon ? "system/\(label)" : "gui/\(getuid())/\(label)"
+    }
+
+    /// One step of an update. `.either` steps run as root when adjacent to root work
+    /// (so they share its prompt) and as the user otherwise.
+    private enum UpdateStep {
+        case root(String)
+        case user(() async throws -> Void)
+        case either(String, () async throws -> Void)
+    }
+
+    /// Decide which steps run as root: true = root, false = user, nil = either.
+    /// An "either" step runs as root if its nearest decided neighbour on either side is root.
+    static func resolveRoot(_ kinds: [Bool?]) -> [Bool] {
+        kinds.indices.map { i in
+            if let k = kinds[i] { return k }
+            let prev = kinds[..<i].reversed().lazy.compactMap { $0 }.first
+            let next = kinds[(i + 1)...].lazy.compactMap { $0 }.first
+            return prev == true || next == true
+        }
+    }
+
+    /// Run steps in order, batching consecutive root steps into a single admin prompt.
+    private func run(_ steps: [UpdateStep]) async throws {
+        let asRoot = Self.resolveRoot(steps.map { step -> Bool? in
+            switch step { case .root: return true; case .user: return false; case .either: return nil }
+        })
+        var rootBatch: [String] = []
+        func flush() async throws {
+            guard !rootBatch.isEmpty else { return }
+            try await executeElevated(script: rootBatch.joined(separator: " && "))
+            rootBatch = []
+        }
+        for (step, root) in zip(steps, asRoot) {
+            switch step {
+            case .root(let cmd):
+                rootBatch.append(cmd)
+            case .either(let cmd, let work):
+                if root {
+                    rootBatch.append(cmd)
+                } else {
+                    try await flush()
+                    try await work()
+                }
+            case .user(let work):
+                try await flush()
+                try await work()
+            }
+        }
+        try await flush()
+    }
+
+    /// Update a task without ever leaving it with no plist: the new file is written first,
+    /// the old job is unloaded by label (so overwriting the same path is safe), the old file
+    /// is removed only if the path changed, then the new job is loaded. All privileged steps
+    /// share one admin prompt. Keys the app doesn't model are preserved from the old plist.
     func updateTask(oldTask: ScheduledTask, newTask: ScheduledTask) async throws {
-        let oldElevated = oldTask.location.requiresElevation
-        let newElevated = newTask.location.requiresElevation
-
-        // 1. Always try to unload old task
         let oldPath = resolvedPlistPath(for: oldTask)
-        if fileManager.fileExists(atPath: oldPath) {
-            let _ = try? await launchctl("unload", path: oldPath, elevated: oldElevated)
+        let newPath = plistURL(for: newTask).path
+        let oldExists = fileManager.fileExists(atPath: oldPath)
+        let content = plistContent(for: newTask, mergingWith: oldExists ? oldPath : nil)
+        let newFileNeedsRoot = newTask.location.requiresElevation
+        let oldFileNeedsRoot = oldTask.location.requiresElevation
+        let oldTarget = serviceTarget(label: oldTask.launchdLabel, location: oldTask.location)
+        let newDaemon = loadNeedsRoot(newTask.location)
+
+        var steps: [UpdateStep] = []
+
+        // 1. Write the new plist
+        if newFileNeedsRoot {
+            steps.append(.root(elevatedWriteCommand(content: content, to: newPath)))
+        } else {
+            steps.append(.user { try content.write(toFile: newPath, atomically: true, encoding: .utf8) })
         }
 
-        // 2. Delete old plist file
-        if fileManager.fileExists(atPath: oldPath) {
-            try? await deleteFile(at: oldPath, elevated: oldElevated)
+        // 2. Unload the old job by label (failure = it wasn't loaded)
+        let bootout = "(/bin/launchctl bootout \(shellQuote(oldTarget)) 2>/dev/null || true)"
+        let userBootout: () async throws -> Void = {
+            _ = try? await self.shellExecutor.execute(command: "/bin/launchctl", arguments: ["bootout", oldTarget])
+        }
+        steps.append(loadNeedsRoot(oldTask.location) ? .root(bootout) : .either(bootout, userBootout))
+
+        // 3. Remove the old plist if it lived elsewhere (label or location changed)
+        if oldExists && oldPath != newPath {
+            let rm = "rm -f \(shellQuote(oldPath))"
+            steps.append(oldFileNeedsRoot ? .root(rm) : .either(rm) { try self.fileManager.removeItem(atPath: oldPath) })
         }
 
-        // 3. Write new plist file to target location
-        let plistContent = plistGenerator.generate(for: newTask)
-        let newPlistPath = plistURL(for: newTask).path
-        do {
-            try await writeFile(content: plistContent, to: newPlistPath, elevated: newElevated)
-        } catch {
-            throw SchedulerError.plistCreationFailed(error.localizedDescription)
+        // 4. Load the new job (and unload again if it should stay disabled)
+        if newDaemon {
+            steps.append(.root("/bin/launchctl load \(shellQuote(newPath))"))
+            if !newTask.isEnabled {
+                steps.append(.root("(/bin/launchctl unload \(shellQuote(newPath)) || true)"))
+            }
+        } else {
+            steps.append(.user {
+                // If step 2 ran inside a root batch, make sure the old agent is gone from our domain too
+                if !self.loadNeedsRoot(oldTask.location) { try await userBootout() }
+                let result = try await self.launchctl("load", path: newPath, elevated: false)
+                if result.exitCode != 0 && !result.standardError.contains("already loaded") {
+                    throw SchedulerError.plistLoadFailed(result.standardError)
+                }
+                if !newTask.isEnabled {
+                    _ = try? await self.launchctl("unload", path: newPath, elevated: false)
+                }
+            })
         }
 
-        // 4. Load new plist
-        let loadResult = try await launchctl("load", path: newPlistPath, elevated: newElevated)
-        if loadResult.exitCode != 0 && !loadResult.standardError.contains("already loaded") {
-            throw SchedulerError.plistLoadFailed(loadResult.standardError)
+        try await run(steps)
+    }
+
+    /// Keys this app models. Everything else in an existing plist (WatchPaths, Sockets,
+    /// ThrottleInterval, ...) is carried over unchanged when a task is edited.
+    private static let managedPlistKeys: Set<String> = [
+        "Label", "Program", "ProgramArguments", "WorkingDirectory", "EnvironmentVariables",
+        "StartCalendarInterval", "StartInterval", "RunAtLoad", "KeepAlive",
+        "StandardOutPath", "StandardErrorPath", "UserName",
+        "MacSchedulerName", "MacSchedulerDescription",
+    ]
+
+    /// Generate the plist for `task`, merged over the existing plist at `existingPath`.
+    func plistContent(for task: ScheduledTask, mergingWith existingPath: String?) -> String {
+        let generated = plistGenerator.generate(for: task)
+        guard let path = existingPath,
+              let oldData = fileManager.contents(atPath: path), oldData.count < 1_048_576,
+              let old = try? PropertyListSerialization.propertyList(from: oldData, format: nil) as? [String: Any],
+              let new = try? PropertyListSerialization.propertyList(from: Data(generated.utf8), format: nil) as? [String: Any]
+        else { return generated }
+
+        var merged = old.filter { !Self.managedPlistKeys.contains($0.key) }
+        merged.merge(new) { _, generatedValue in generatedValue }
+
+        // Multiple calendar entries: the editor only shows the first. Keep them all unless it changed.
+        // (Editor turns an absent Minute/Hour into 0, so compare with that normalisation.)
+        func normalized(_ d: [String: Any]) -> NSDictionary {
+            var d = d
+            d["Minute"] = d["Minute"] ?? 0
+            d["Hour"] = d["Hour"] ?? 0
+            return d as NSDictionary
+        }
+        if let oldEntries = old["StartCalendarInterval"] as? [[String: Any]], oldEntries.count > 1,
+           let newEntry = new["StartCalendarInterval"] as? [String: Any],
+           normalized(oldEntries[0]).isEqual(normalized(newEntry)) {
+            merged["StartCalendarInterval"] = oldEntries
         }
 
-        // 5. If task should be disabled, unload after registering
-        if !newTask.isEnabled {
-            let _ = try? await launchctl("unload", path: newPlistPath, elevated: newElevated)
+        // Conditional KeepAlive (a dict) is shown as "on" — keep the conditions while it stays on
+        if old["KeepAlive"] is [String: Any], new["KeepAlive"] as? Bool == true {
+            merged["KeepAlive"] = old["KeepAlive"]
         }
+
+        guard let data = try? PropertyListSerialization.data(fromPropertyList: merged, format: .xml, options: 0) else {
+            return generated
+        }
+        return String(decoding: data, as: UTF8.self)
     }
 
     func runNow(task: ScheduledTask) async throws -> TaskExecutionResult {
@@ -604,8 +737,8 @@ class LaunchdService: SchedulerService {
                 schedule.day = first["Day"]
                 schedule.weekday = first["Weekday"]
                 schedule.month = first["Month"]
+                // Only the first entry is modelled; updateTask keeps the rest (see plistContent)
                 task.trigger = TaskTrigger(type: .calendar, calendarSchedule: schedule)
-                task.description = "Multiple schedules (\(calendarArray.count) triggers)"
             }
         } else if let interval = plist["StartInterval"] as? Int {
             task.trigger = TaskTrigger(type: .interval, intervalSeconds: interval)

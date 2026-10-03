@@ -353,10 +353,11 @@ class TaskListViewModel: ObservableObject {
             let name = oldTask.name
             let backend = oldTask.backend.rawValue
             let newLabel = task.launchdLabel != oldTask.launchdLabel ? task.launchdLabel : nil
+            let location = oldTask.location
             Task {
                 await versionService.saveSnapshotWithContent(
                     snapshotContent, label: label, name: name,
-                    reason: .beforeEdit, backend: backend, newLabel: newLabel
+                    reason: .beforeEdit, backend: backend, newLabel: newLabel, location: location
                 )
             }
         } else if oldTask.backend == .cron {
@@ -450,10 +451,11 @@ class TaskListViewModel: ObservableObject {
             let label = task.launchdLabel
             let name = task.name
             let backend = task.backend.rawValue
+            let location = task.location
             Task {
                 await versionService.saveSnapshotWithContent(
                     snapshotContent, label: label, name: name,
-                    reason: .beforeDelete, backend: backend
+                    reason: .beforeDelete, backend: backend, location: location
                 )
             }
         } else if task.backend == .cron {
@@ -641,10 +643,11 @@ class TaskListViewModel: ObservableObject {
             let label = task.launchdLabel
             let name = task.name
             let backend = task.backend.rawValue
+            let location = task.location
             Task {
                 await versionService.saveSnapshotWithContent(
                     currentContent, label: label, name: name,
-                    reason: .beforeEdit, backend: backend
+                    reason: .beforeEdit, backend: backend, location: location
                 )
             }
         } else if task.backend == .cron {
@@ -677,7 +680,7 @@ class TaskListViewModel: ObservableObject {
 
         do {
             if snapshot.backend == SchedulerBackend.launchd.rawValue {
-                try await restoreLaunchdTask(content: content)
+                try await restoreLaunchdTask(content: content, location: snapshot.location ?? .userAgent)
             } else if snapshot.backend == SchedulerBackend.cron.rawValue {
                 try await restoreCronTask(content: content, label: snapshot.taskLabel)
             }
@@ -750,7 +753,9 @@ class TaskListViewModel: ObservableObject {
         try await reinstallCronFromSnapshot(content: content)
     }
 
-    private func restoreLaunchdTask(content: String) async throws {
+    /// Restore into the domain the task was deleted from (System Daemon → /Library/LaunchDaemons, etc.),
+    /// so it runs as the same user it did before. Older snapshots without a location restore as user agents.
+    private func restoreLaunchdTask(content: String, location: TaskLocation) async throws {
         let data = Data(content.utf8)
         guard var parsedTask = LaunchdService.shared.parsePlistData(data) else {
             throw SchedulerError.invalidTask("Snapshot contains invalid plist data")
@@ -767,21 +772,25 @@ class TaskListViewModel: ObservableObject {
             throw SchedulerError.invalidTask("Snapshot failed validation: \(validationErrors.joined(separator: "; "))")
         }
 
-        // Re-generate a clean plist via PlistGenerator (applies XML escaping, control char stripping)
-        let cleanPlist = PlistGenerator().generate(for: parsedTask)
+        parsedTask.location = location
+        parsedTask.isReadOnly = false
+        parsedTask.plistFilePath = nil
 
-        let baseDir = TaskLocation.userAgent.directory
+        let baseDir = location.directory
         let plistURL = URL(fileURLWithPath: baseDir)
             .appendingPathComponent(parsedTask.plistFileName)
 
-        // Validate the write destination resolves within the LaunchAgents directory
+        // Validate the write destination resolves within the target launch directory
         let resolvedPath = plistURL.resolvingSymlinksInPath().path
         let resolvedDir = URL(fileURLWithPath: baseDir).resolvingSymlinksInPath().path
         guard resolvedPath.hasPrefix(resolvedDir + "/") else {
-            throw SchedulerError.invalidTask("Plist path resolves outside LaunchAgents directory")
+            throw SchedulerError.invalidTask("Plist path resolves outside \(baseDir)")
         }
 
-        try cleanPlist.write(toFile: plistURL.path, atomically: true, encoding: .utf8)
+        // install() re-generates a clean plist via PlistGenerator (XML escaping, control char
+        // stripping) and writes it with elevation for system locations; enable() loads it in
+        // the right domain
+        try await LaunchdService.shared.install(task: parsedTask)
         try await LaunchdService.shared.enable(task: parsedTask)
     }
 

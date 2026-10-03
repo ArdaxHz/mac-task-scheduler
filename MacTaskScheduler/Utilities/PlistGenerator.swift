@@ -97,27 +97,12 @@ class PlistGenerator {
                 parts.append("    </array>")
             }
 
-        case .shellScript:
+        case .shellScript, .appleScript:
+            let args = Self.programArguments(for: task.action)
             parts.append("    <key>ProgramArguments</key>")
             parts.append("    <array>")
-            parts.append("        <string>/bin/bash</string>")
-            if let script = task.action.scriptContent, !script.isEmpty {
-                parts.append("        <string>-c</string>")
-                parts.append("        <string>\(escapeXML(script))</string>")
-            } else {
-                parts.append("        <string>\(escapeXML(task.action.path))</string>")
-            }
-            parts.append("    </array>")
-
-        case .appleScript:
-            parts.append("    <key>ProgramArguments</key>")
-            parts.append("    <array>")
-            parts.append("        <string>/usr/bin/osascript</string>")
-            if let script = task.action.scriptContent, !script.isEmpty {
-                parts.append("        <string>-e</string>")
-                parts.append("        <string>\(escapeXML(script))</string>")
-            } else {
-                parts.append("        <string>\(escapeXML(task.action.path))</string>")
+            for arg in args {
+                parts.append("        <string>\(escapeXML(arg))</string>")
             }
             parts.append("    </array>")
         }
@@ -139,6 +124,28 @@ class PlistGenerator {
             }
             parts.append("    </dict>")
         }
+    }
+
+    static let shellBinaryNames: Set<String> = ["bash", "sh", "zsh", "fish", "dash"]
+
+    /// ProgramArguments for script actions. Two shapes reach here:
+    /// - editor-built: path = script file (or empty for inline), arguments = script args
+    /// - parsed from a plist: path = interpreter (e.g. /bin/zsh), arguments = [script, args...] or ["-c", script]
+    /// The original interpreter is kept so a zsh task doesn't silently become bash.
+    static func programArguments(for action: TaskAction) -> [String] {
+        let isShell = action.type == .shellScript
+        let pathName = (action.path as NSString).lastPathComponent
+        let pathIsInterpreter = isShell ? shellBinaryNames.contains(pathName) : pathName == "osascript"
+        let interpreter = pathIsInterpreter ? action.path : (isShell ? "/bin/bash" : "/usr/bin/osascript")
+        let inlineFlag = isShell ? "-c" : "-e"
+
+        if let script = action.scriptContent, !script.isEmpty {
+            return [interpreter, inlineFlag, script]
+        }
+        if pathIsInterpreter {
+            return [interpreter] + action.arguments
+        }
+        return [interpreter, action.path] + action.arguments
     }
 
     private func appendTriggerSection(for task: ScheduledTask, to parts: inout [String]) {

@@ -118,7 +118,11 @@ class DockerService: SchedulerService {
         guard let info = task.containerInfo else {
             throw SchedulerError.invalidTask("Not a Docker container")
         }
+        _ = try await runContainer(info, docker: docker)
+    }
 
+    /// `docker run -d` from a ContainerInfo. Returns the new container's ID.
+    private func runContainer(_ info: ContainerInfo, docker: String) async throws -> String {
         // Validate image name
         guard Self.validateImageName(info.imageName) else {
             throw SchedulerError.invalidTask("Invalid Docker image name")
@@ -170,10 +174,18 @@ class DockerService: SchedulerService {
             args.append(contentsOf: ["-v", volume])
         }
 
+        // Entrypoint: --entrypoint takes one executable; any further entrypoint
+        // elements go in front of the command, which is how Docker joins them anyway
+        let entrypoint = (info.entrypoint ?? []).filter { !Self.hasNullBytes($0) }
+        if let first = entrypoint.first {
+            args.append(contentsOf: ["--entrypoint", first])
+        }
+
         // Image
         args.append(info.imageName)
 
         // Command override
+        args.append(contentsOf: entrypoint.dropFirst())
         if !info.command.isEmpty {
             args.append(contentsOf: info.command)
         }
@@ -187,6 +199,7 @@ class DockerService: SchedulerService {
         if result.exitCode != 0 {
             throw SchedulerError.dockerCommandFailed("Failed to create container: \(result.standardError)")
         }
+        return result.standardOutput.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func uninstall(task: ScheduledTask) async throws {
@@ -342,8 +355,14 @@ class DockerService: SchedulerService {
         guard let docker = dockerPath else {
             throw SchedulerError.dockerNotAvailable("Docker CLI not found")
         }
-        guard let info = oldTask.containerInfo else {
+        guard let info = oldTask.containerInfo, let newInfo = newTask.containerInfo else {
             throw SchedulerError.invalidTask("Not a Docker container")
+        }
+        // A plain `docker run` would detach it from Compose (labels, project network, depends_on)
+        if let project = info.composeProject, !project.isEmpty {
+            throw SchedulerError.dockerOperationNotSupported(
+                "This container is managed by Docker Compose project \"\(project)\". " +
+                "Edit its compose file and run `docker compose up -d` instead.")
         }
         // Refuse to clobber a different existing container (rollback below relies on this)
         if let newName = newTask.containerInfo?.containerName, !newName.isEmpty, newName != info.containerName {
@@ -368,12 +387,27 @@ class DockerService: SchedulerService {
             throw SchedulerError.dockerCommandFailed("Failed to rename old container: \(rename.standardError)")
         }
 
+        var newId: String?
         do {
-            try await install(task: newTask)
+            let id = try await runContainer(newInfo, docker: docker)
+            newId = id
+            // `docker run --network` attaches one network; reattach any others the old container had
+            let primary = newInfo.networkMode ?? "bridge"
+            for network in info.networks ?? [] where network != primary && !Self.hasNullBytes(network) {
+                if primary == "default" && network == "bridge" { continue }
+                let connect = try await shellExecutor.execute(
+                    command: docker, arguments: ["network", "connect", network, id], timeout: 30.0)
+                if connect.exitCode != 0 {
+                    throw SchedulerError.dockerCommandFailed("Failed to connect network \(network): \(connect.standardError)")
+                }
+            }
         } catch {
-            // Roll back: drop a half-created replacement, restore the original under its name
-            if let newName = newTask.containerInfo?.containerName, !newName.isEmpty {
-                _ = try? await shellExecutor.execute(command: docker, arguments: ["rm", "-f", newName], timeout: 30.0)
+            // Roll back: drop a half-created replacement, restore the original under its name.
+            // (A failed `docker run` can leave a created-but-not-started container behind.)
+            if let id = newId {
+                _ = try? await shellExecutor.execute(command: docker, arguments: ["rm", "-f", id], timeout: 30.0)
+            } else if !newInfo.containerName.isEmpty {
+                _ = try? await shellExecutor.execute(command: docker, arguments: ["rm", "-f", newInfo.containerName], timeout: 30.0)
             }
             if !info.containerName.isEmpty {
                 _ = try? await shellExecutor.execute(
@@ -669,7 +703,8 @@ class DockerService: SchedulerService {
                 environmentVariables: envVars,
                 command: cmdArray,
                 entrypoint: entrypointArray,
-                containerName: containerName
+                containerName: containerName,
+                networks: ((networkSettings["Networks"] as? [String: Any])?.keys).map { Array($0).sorted() }
             )
 
             let label = "docker.\(containerName)"

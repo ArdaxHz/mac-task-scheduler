@@ -349,7 +349,7 @@ class CronService: SchedulerService {
             return nil
         }
 
-        // Undo cron's % escaping; quoting is handled by shellSplit below
+        // Undo cron's % escaping; quoting is handled by ShellWords.split below
         let command = components.dropFirst(5).joined(separator: " ")
             .replacingOccurrences(of: "\\%", with: "%")
 
@@ -374,12 +374,12 @@ class CronService: SchedulerService {
                let data = Data(base64Encoded: String(quoted[b64Range])) {
                 task.action.scriptContent = String(decoding: data, as: UTF8.self)
             } else {
-                task.action.scriptContent = Self.shellSplit(quoted).joined(separator: " ")
+                task.action.scriptContent = ShellWords.split(quoted).joined(separator: " ")
             }
             return task
         }
 
-        let parts = Self.shellSplit(command)
+        let parts = ShellWords.split(command)
         guard let first = parts.first else { return nil }
         if first == "/bin/bash" && parts.count == 2 {
             task.action.type = .shellScript
@@ -394,42 +394,5 @@ class CronService: SchedulerService {
         }
 
         return task
-    }
-
-    /// Minimal POSIX word splitting: single quotes, double quotes, backslash escapes.
-    /// No expansion — `$VAR` etc. are kept literally.
-    static func shellSplit(_ input: String) -> [String] {
-        var words: [String] = []
-        var current = ""
-        var inWord = false
-        var quote: Character?
-        var chars = Array(input)[...]
-
-        while let c = chars.popFirst() {
-            if quote == "'" {
-                if c == "'" { quote = nil } else { current.append(c) }
-            } else if quote == "\"" {
-                if c == "\"" {
-                    quote = nil
-                } else if c == "\\", let next = chars.first, "\"\\$`".contains(next) {
-                    current.append(chars.removeFirst())
-                } else {
-                    current.append(c)
-                }
-            } else if c == " " || c == "\t" {
-                if inWord { words.append(current); current = ""; inWord = false }
-            } else {
-                inWord = true
-                if c == "'" || c == "\"" {
-                    quote = c
-                } else if c == "\\", let next = chars.popFirst() {
-                    current.append(next)
-                } else {
-                    current.append(c)
-                }
-            }
-        }
-        if inWord { words.append(current) }
-        return words
     }
 }
