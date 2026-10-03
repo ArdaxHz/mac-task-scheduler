@@ -73,6 +73,9 @@ struct TaskDetailView: View {
         .task {
             versionSnapshots = await TaskVersionService.shared.getSnapshots(for: task.launchdLabel)
         }
+        .task(id: task.launchdLabel) {
+            await viewModel.loadDetails(for: task.launchdLabel)
+        }
         .onChange(of: task.launchdLabel) { _, newLabel in
             Task {
                 versionSnapshots = await TaskVersionService.shared.getSnapshots(for: newLabel)

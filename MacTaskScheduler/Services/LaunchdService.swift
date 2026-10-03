@@ -504,11 +504,10 @@ class LaunchdService: SchedulerService {
 
     /// Read run count, last exit code, and PID from launchctl print.
     func getLaunchdInfo(for task: ScheduledTask) async -> ServicePrintInfo? {
-        let uid = getuid()
         do {
             let result = try await shellExecutor.execute(
                 command: "/bin/launchctl",
-                arguments: ["print", "gui/\(uid)/\(task.launchdLabel)"],
+                arguments: ["print", serviceTarget(label: task.launchdLabel, location: task.location)],
                 timeout: 5.0
             )
             guard result.exitCode == 0 else { return nil }
@@ -629,8 +628,13 @@ class LaunchdService: SchedulerService {
             for url in contents where url.pathExtension == "plist" {
                 if var task = parsePlist(at: url, isUserWritable: dir.isUserWritable) {
                     if let info = loadedServices[task.launchdLabel] {
-                        if info.pid != nil {
+                        if let pid = info.pid {
                             task.status.state = .running
+                            // sysctl, no subprocess — cheap enough to do for every running job
+                            if let start = getProcessStartTime(pid: pid) {
+                                task.status.processStartTime = start
+                                task.status.lastRun = start
+                            }
                         } else if info.lastExitStatus != 0 {
                             task.status.state = .error
                             task.status.lastExitStatus = info.lastExitStatus

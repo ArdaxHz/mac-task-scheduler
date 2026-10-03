@@ -208,46 +208,9 @@ class TaskListViewModel: ObservableObject {
                 }
             }
 
-            // Fetch launchctl print info in parallel for loaded (enabled/running/error) tasks
-            let loadedIndices = launchdIndices.filter {
-                let state = allTasks[$0].status.state
-                return state == .enabled || state == .running || state == .error
-            }
-            if !loadedIndices.isEmpty {
-                let infos: [(Int, LaunchdService.ServicePrintInfo?)] = await withTaskGroup(of: (Int, LaunchdService.ServicePrintInfo?).self) { group in
-                    for i in loadedIndices {
-                        let task = allTasks[i]
-                        group.addTask {
-                            let info = await launchdService.getLaunchdInfo(for: task)
-                            return (i, info)
-                        }
-                    }
-                    var results: [(Int, LaunchdService.ServicePrintInfo?)] = []
-                    results.reserveCapacity(loadedIndices.count)
-                    for await result in group {
-                        results.append(result)
-                    }
-                    return results
-                }
-                for (i, info) in infos {
-                    if let info = info {
-                        allTasks[i].status.runCount = info.runs
-
-                        if let pid = info.pid {
-                            // Running task: store process start time
-                            if let startTime = launchdService.getProcessStartTime(pid: pid) {
-                                allTasks[i].status.processStartTime = startTime
-                                allTasks[i].status.lastRun = startTime
-                            }
-                        }
-
-                        // Store last exit code for error tasks
-                        if allTasks[i].status.state == .error {
-                            allTasks[i].status.lastExitStatus = info.lastExitCode
-                        }
-                    }
-                }
-            }
+            // Per-task details (launchctl print run counts, log tails) are loaded lazily for
+            // the selected task only — see loadDetails(for:). Doing it here spawned one
+            // launchctl process per loaded job (~500 on a typical Mac) on every refresh.
 
             // Merge app execution history as fallback for last run time
             for i in allTasks.indices {
@@ -264,23 +227,6 @@ class TaskListViewModel: ObservableObject {
                     }
                     allTasks[i].status.failureCount = taskHistory.filter { !$0.success }.count
                 }
-
-                // For tasks with no app-recorded lastResult, synthesize one from log files
-                if allTasks[i].status.lastResult == nil, let lastRun = allTasks[i].status.lastRun {
-                    let stdout = Self.readLogFile(allTasks[i].standardOutPath)
-                    let stderr = Self.readLogFile(allTasks[i].standardErrorPath)
-                    if stdout != nil || stderr != nil {
-                        let exitCode = allTasks[i].status.lastExitStatus ?? 0
-                        allTasks[i].status.lastResult = TaskExecutionResult(
-                            taskId: allTasks[i].id,
-                            startTime: lastRun,
-                            endTime: lastRun,
-                            exitCode: exitCode,
-                            standardOutput: stdout ?? "",
-                            standardError: stderr ?? ""
-                        )
-                    }
-                }
             }
 
             allTasks.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -295,6 +241,7 @@ class TaskListViewModel: ObservableObject {
             if let selected = selectedTask,
                let updated = tasks.first(where: { $0.launchdLabel == selected.launchdLabel }) {
                 selectedTask = updated
+                await loadDetails(for: updated.launchdLabel)
             } else if selectedTask != nil {
                 selectedTask = nil
             }
@@ -602,6 +549,38 @@ class TaskListViewModel: ObservableObject {
     func refreshTaskStatus(_ task: ScheduledTask) async {
         // Just re-discover everything for consistency
         await discoverAllTasks()
+    }
+
+    /// Fill in the details only the detail panel shows (run count, last exit code, last output
+    /// from log files) for one task. Called when a task is selected, not during discovery.
+    func loadDetails(for label: String) async {
+        guard let task = tasks.first(where: { $0.launchdLabel == label }), task.backend == .launchd else { return }
+        var status = task.status
+
+        if task.isEnabled || status.state == .error,
+           let info = await LaunchdService.shared.getLaunchdInfo(for: task) {
+            if status.runCount == 0 { status.runCount = info.runs }
+            if status.state == .error { status.lastExitStatus = info.lastExitCode }
+        }
+
+        // No app-recorded result: synthesize one from the task's own log files
+        if status.lastResult == nil, let lastRun = status.lastRun {
+            let stdout = Self.readLogFile(task.standardOutPath)
+            let stderr = Self.readLogFile(task.standardErrorPath)
+            if stdout != nil || stderr != nil {
+                status.lastResult = TaskExecutionResult(
+                    taskId: task.id, startTime: lastRun, endTime: lastRun,
+                    exitCode: status.lastExitStatus ?? 0,
+                    standardOutput: stdout ?? "", standardError: stderr ?? "")
+            }
+        }
+
+        // Tasks may have been re-discovered while we awaited
+        guard let i = tasks.firstIndex(where: { $0.launchdLabel == label }) else { return }
+        tasks[i].status = status
+        if selectedTask?.launchdLabel == label {
+            selectedTask = tasks[i]
+        }
     }
 
     /// Read the tail of a log file, returning nil if the file doesn't exist or is empty.

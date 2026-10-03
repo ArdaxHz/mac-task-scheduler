@@ -223,16 +223,16 @@ struct SettingsView: View {
 
                     HStack(spacing: 16) {
                         Button {
-                            if let url = URL(string: "https://ardax.dev") {
+                            if let url = URL(string: "https://nevra.tech") {
                                 NSWorkspace.shared.open(url)
                             }
                         } label: {
-                            Label("ardax.dev", systemImage: "globe")
+                            Label("nevra.tech", systemImage: "globe")
                         }
                         .buttonStyle(.link)
 
                         Button {
-                            if let url = URL(string: "https://github.com/ArdaxHz/mac-scheduler") {
+                            if let url = URL(string: "https://github.com/ArdaxHz/mac-task-scheduler") {
                                 NSWorkspace.shared.open(url)
                             }
                         } label: {
