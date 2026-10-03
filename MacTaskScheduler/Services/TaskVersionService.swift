@@ -53,22 +53,23 @@ actor TaskVersionService {
 
         guard let content = content, !content.isEmpty else { return }
         writeSnapshot(content: content, label: task.launchdLabel, name: task.name,
-                      reason: reason, backend: task.backend.rawValue, newLabel: newLabel)
+                      reason: reason, backend: task.backend.rawValue, newLabel: newLabel,
+                      location: task.backend == .launchd ? task.location : nil)
     }
 
     /// Save a snapshot with pre-read content. Use this when the caller already has the file content
     /// to avoid blocking the caller on actor-internal file reads.
     func saveSnapshotWithContent(_ content: String, label: String, name: String,
                                  reason: TaskSnapshot.SnapshotReason, backend: String,
-                                 newLabel: String? = nil) {
+                                 newLabel: String? = nil, location: TaskLocation? = nil) {
         guard !content.isEmpty else { return }
         writeSnapshot(content: content, label: label, name: name,
-                      reason: reason, backend: backend, newLabel: newLabel)
+                      reason: reason, backend: backend, newLabel: newLabel, location: location)
     }
 
     private func writeSnapshot(content: String, label: String, name: String,
                                 reason: TaskSnapshot.SnapshotReason, backend: String,
-                                newLabel: String?) {
+                                newLabel: String?, location: TaskLocation?) {
         let sanitizedLabel = sanitizeForFilename(label)
         guard !sanitizedLabel.isEmpty else { return }
 
@@ -106,7 +107,8 @@ actor TaskVersionService {
                 reason: reason,
                 backend: backend,
                 snapshotFileName: fileName,
-                newLabel: newLabel
+                newLabel: newLabel,
+                location: location
             )
             snapshots.insert(snapshot, at: 0)
 

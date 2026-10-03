@@ -96,38 +96,38 @@ class TaskEditorViewModel: ObservableObject {
             if isShellBinary {
                 if let firstArg = task.action.arguments.first, !firstArg.hasPrefix("-") {
                     executablePath = firstArg
-                    arguments = task.action.arguments.dropFirst().joined(separator: " ")
+                    arguments = ShellWords.join(Array(task.action.arguments.dropFirst()))
                 } else if task.action.arguments.first == "-c" {
                     executablePath = ""
                     arguments = ""
                 } else {
                     executablePath = ""
-                    arguments = task.action.arguments.joined(separator: " ")
+                    arguments = ShellWords.join(task.action.arguments)
                 }
             } else {
                 executablePath = path
-                arguments = task.action.arguments.joined(separator: " ")
+                arguments = ShellWords.join(task.action.arguments)
             }
         } else if task.action.type == .appleScript {
             let path = task.action.path
             if path.hasSuffix("osascript") {
                 if let firstArg = task.action.arguments.first, !firstArg.hasPrefix("-") {
                     executablePath = firstArg
-                    arguments = task.action.arguments.dropFirst().joined(separator: " ")
+                    arguments = ShellWords.join(Array(task.action.arguments.dropFirst()))
                 } else if task.action.arguments.first == "-e" {
                     executablePath = ""
                     arguments = ""
                 } else {
                     executablePath = ""
-                    arguments = task.action.arguments.joined(separator: " ")
+                    arguments = ShellWords.join(task.action.arguments)
                 }
             } else {
                 executablePath = path
-                arguments = task.action.arguments.joined(separator: " ")
+                arguments = ShellWords.join(task.action.arguments)
             }
         } else {
             executablePath = task.action.path
-            arguments = task.action.arguments.joined(separator: " ")
+            arguments = ShellWords.join(task.action.arguments)
         }
 
         triggerType = task.trigger.type
@@ -393,15 +393,8 @@ class TaskEditorViewModel: ObservableObject {
             validationErrors.append("\(label) must be an absolute path")
             return
         }
-
-        // Reject paths in system-critical directories for writing
-        let systemDirs = ["/System", "/usr/bin", "/usr/sbin", "/sbin", "/bin"]
-        for dir in systemDirs {
-            if expanded.hasPrefix(dir + "/") || expanded == dir {
-                validationErrors.append("\(label) must not point to a system directory")
-                return
-            }
-        }
+        // No system-directory block here: these paths are only executed/read
+        // (e.g. /usr/bin/caffeinate). Writes go through validateOutputPath / isSafeScriptWritePath.
     }
 
     /// Validate an output path (stdout/stderr) for safety.
@@ -608,11 +601,10 @@ class TaskEditorViewModel: ObservableObject {
             id: editingTask?.action.id ?? UUID(),
             type: actionType,
             path: cleanPath,
-            arguments: arguments.isEmpty ? [] : Self.sanitizeNameField(arguments)
-                .components(separatedBy: " ")
-                .filter { !$0.isEmpty },
+            // Quote-aware so arguments containing spaces survive a load/save round trip
+            arguments: arguments.isEmpty ? [] : ShellWords.split(Self.sanitizeNameField(arguments)),
             workingDirectory: cleanWorkDir.isEmpty ? nil : cleanWorkDir,
-            environmentVariables: [:],
+            environmentVariables: editingTask?.action.environmentVariables ?? [:],
             scriptContent: inlineScript
         )
 

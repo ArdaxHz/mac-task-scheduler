@@ -11,7 +11,7 @@ actor UpdateService {
     static let shared = UpdateService()
 
     private let repoOwner = "ArdaxHz"
-    private let repoName = "mac-scheduler"
+    private let repoName = "mac-task-scheduler"
 
     struct Release {
         let tagName: String

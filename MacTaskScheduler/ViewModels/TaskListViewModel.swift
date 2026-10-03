@@ -132,39 +132,42 @@ class TaskListViewModel: ObservableObject {
             let cronService = CronService.shared
 
             log.info("Starting task discovery")
-            // Fetch launchd + cron + docker tasks in parallel
+            // Fetch all backends in parallel so a slow Docker/VM CLI only costs one timeout
             async let launchdResult = launchdService.discoverTasks()
             async let cronResult = cronService.discoverTasks()
-            let (launchdTasks, cronTasks) = try await (launchdResult, cronResult)
-            log.info("Discovered \(launchdTasks.count) launchd tasks, \(cronTasks.count) cron tasks")
 
             // Docker discovery is non-blocking — failure should not affect other backends
-            var dockerTasks: [ScheduledTask] = []
-            do {
-                dockerTasks = try await DockerService.shared.discoverTasks()
-                if !dockerTasks.isEmpty {
-                    log.info("Discovered \(dockerTasks.count) Docker containers")
+            async let dockerResult: [ScheduledTask] = {
+                do {
+                    return try await DockerService.shared.discoverTasks()
+                } catch {
+                    log.debug("Docker discovery skipped: \(error.localizedDescription)")
+                    return []
                 }
-            } catch {
-                log.debug("Docker discovery skipped: \(error.localizedDescription)")
-            }
+            }()
 
             // VM discovery — each backend is non-blocking, failures silently ignored
-            var vmTasks: [ScheduledTask] = []
-            let vmServices: [any SchedulerService] = [
-                ParallelsService.shared,
-                VirtualBoxService.shared,
-                UTMService.shared,
-                VMwareFusionService.shared
-            ]
-            for vmService in vmServices {
-                do {
-                    let tasks = try await vmService.discoverTasks()
-                    vmTasks.append(contentsOf: tasks)
-                } catch {
-                    // Silently ignore VM discovery errors (tool may not be installed)
+            async let vmResult: [ScheduledTask] = withTaskGroup(of: [ScheduledTask].self) { group in
+                let vmServices: [any SchedulerService] = [
+                    ParallelsService.shared,
+                    VirtualBoxService.shared,
+                    UTMService.shared,
+                    VMwareFusionService.shared
+                ]
+                for vmService in vmServices {
+                    // Tool may not be installed — ignore errors
+                    group.addTask { (try? await vmService.discoverTasks()) ?? [] }
                 }
+                return await group.reduce(into: []) { $0.append(contentsOf: $1) }
             }
+
+            let (launchdTasks, cronTasks) = try await (launchdResult, cronResult)
+            log.info("Discovered \(launchdTasks.count) launchd tasks, \(cronTasks.count) cron tasks")
+            let dockerTasks = await dockerResult
+            if !dockerTasks.isEmpty {
+                log.info("Discovered \(dockerTasks.count) Docker containers")
+            }
+            let vmTasks = await vmResult
 
             // Dedup by task ID (deterministic UUID from label) — prefer user-writable over read-only
             var tasksById: [UUID: ScheduledTask] = [:]
@@ -205,46 +208,9 @@ class TaskListViewModel: ObservableObject {
                 }
             }
 
-            // Fetch launchctl print info in parallel for loaded (enabled/running/error) tasks
-            let loadedIndices = launchdIndices.filter {
-                let state = allTasks[$0].status.state
-                return state == .enabled || state == .running || state == .error
-            }
-            if !loadedIndices.isEmpty {
-                let infos: [(Int, LaunchdService.ServicePrintInfo?)] = await withTaskGroup(of: (Int, LaunchdService.ServicePrintInfo?).self) { group in
-                    for i in loadedIndices {
-                        let task = allTasks[i]
-                        group.addTask {
-                            let info = await launchdService.getLaunchdInfo(for: task)
-                            return (i, info)
-                        }
-                    }
-                    var results: [(Int, LaunchdService.ServicePrintInfo?)] = []
-                    results.reserveCapacity(loadedIndices.count)
-                    for await result in group {
-                        results.append(result)
-                    }
-                    return results
-                }
-                for (i, info) in infos {
-                    if let info = info {
-                        allTasks[i].status.runCount = info.runs
-
-                        if let pid = info.pid {
-                            // Running task: store process start time
-                            if let startTime = launchdService.getProcessStartTime(pid: pid) {
-                                allTasks[i].status.processStartTime = startTime
-                                allTasks[i].status.lastRun = startTime
-                            }
-                        }
-
-                        // Store last exit code for error tasks
-                        if allTasks[i].status.state == .error {
-                            allTasks[i].status.lastExitStatus = info.lastExitCode
-                        }
-                    }
-                }
-            }
+            // Per-task details (launchctl print run counts, log tails) are loaded lazily for
+            // the selected task only — see loadDetails(for:). Doing it here spawned one
+            // launchctl process per loaded job (~500 on a typical Mac) on every refresh.
 
             // Merge app execution history as fallback for last run time
             for i in allTasks.indices {
@@ -261,23 +227,6 @@ class TaskListViewModel: ObservableObject {
                     }
                     allTasks[i].status.failureCount = taskHistory.filter { !$0.success }.count
                 }
-
-                // For tasks with no app-recorded lastResult, synthesize one from log files
-                if allTasks[i].status.lastResult == nil, let lastRun = allTasks[i].status.lastRun {
-                    let stdout = Self.readLogFile(allTasks[i].standardOutPath)
-                    let stderr = Self.readLogFile(allTasks[i].standardErrorPath)
-                    if stdout != nil || stderr != nil {
-                        let exitCode = allTasks[i].status.lastExitStatus ?? 0
-                        allTasks[i].status.lastResult = TaskExecutionResult(
-                            taskId: allTasks[i].id,
-                            startTime: lastRun,
-                            endTime: lastRun,
-                            exitCode: exitCode,
-                            standardOutput: stdout ?? "",
-                            standardError: stderr ?? ""
-                        )
-                    }
-                }
             }
 
             allTasks.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -292,6 +241,7 @@ class TaskListViewModel: ObservableObject {
             if let selected = selectedTask,
                let updated = tasks.first(where: { $0.launchdLabel == selected.launchdLabel }) {
                 selectedTask = updated
+                await loadDetails(for: updated.launchdLabel)
             } else if selectedTask != nil {
                 selectedTask = nil
             }
@@ -350,10 +300,11 @@ class TaskListViewModel: ObservableObject {
             let name = oldTask.name
             let backend = oldTask.backend.rawValue
             let newLabel = task.launchdLabel != oldTask.launchdLabel ? task.launchdLabel : nil
+            let location = oldTask.location
             Task {
                 await versionService.saveSnapshotWithContent(
                     snapshotContent, label: label, name: name,
-                    reason: .beforeEdit, backend: backend, newLabel: newLabel
+                    reason: .beforeEdit, backend: backend, newLabel: newLabel, location: location
                 )
             }
         } else if oldTask.backend == .cron {
@@ -447,10 +398,11 @@ class TaskListViewModel: ObservableObject {
             let label = task.launchdLabel
             let name = task.name
             let backend = task.backend.rawValue
+            let location = task.location
             Task {
                 await versionService.saveSnapshotWithContent(
                     snapshotContent, label: label, name: name,
-                    reason: .beforeDelete, backend: backend
+                    reason: .beforeDelete, backend: backend, location: location
                 )
             }
         } else if task.backend == .cron {
@@ -599,6 +551,38 @@ class TaskListViewModel: ObservableObject {
         await discoverAllTasks()
     }
 
+    /// Fill in the details only the detail panel shows (run count, last exit code, last output
+    /// from log files) for one task. Called when a task is selected, not during discovery.
+    func loadDetails(for label: String) async {
+        guard let task = tasks.first(where: { $0.launchdLabel == label }), task.backend == .launchd else { return }
+        var status = task.status
+
+        if task.isEnabled || status.state == .error,
+           let info = await LaunchdService.shared.getLaunchdInfo(for: task) {
+            if status.runCount == 0 { status.runCount = info.runs }
+            if status.state == .error { status.lastExitStatus = info.lastExitCode }
+        }
+
+        // No app-recorded result: synthesize one from the task's own log files
+        if status.lastResult == nil, let lastRun = status.lastRun {
+            let stdout = Self.readLogFile(task.standardOutPath)
+            let stderr = Self.readLogFile(task.standardErrorPath)
+            if stdout != nil || stderr != nil {
+                status.lastResult = TaskExecutionResult(
+                    taskId: task.id, startTime: lastRun, endTime: lastRun,
+                    exitCode: status.lastExitStatus ?? 0,
+                    standardOutput: stdout ?? "", standardError: stderr ?? "")
+            }
+        }
+
+        // Tasks may have been re-discovered while we awaited
+        guard let i = tasks.firstIndex(where: { $0.launchdLabel == label }) else { return }
+        tasks[i].status = status
+        if selectedTask?.launchdLabel == label {
+            selectedTask = tasks[i]
+        }
+    }
+
     /// Read the tail of a log file, returning nil if the file doesn't exist or is empty.
     /// Caps at 10K chars to match history truncation limits.
     private static func readLogFile(_ path: String?, maxBytes: Int = 10_000) -> String? {
@@ -638,10 +622,11 @@ class TaskListViewModel: ObservableObject {
             let label = task.launchdLabel
             let name = task.name
             let backend = task.backend.rawValue
+            let location = task.location
             Task {
                 await versionService.saveSnapshotWithContent(
                     currentContent, label: label, name: name,
-                    reason: .beforeEdit, backend: backend
+                    reason: .beforeEdit, backend: backend, location: location
                 )
             }
         } else if task.backend == .cron {
@@ -674,7 +659,7 @@ class TaskListViewModel: ObservableObject {
 
         do {
             if snapshot.backend == SchedulerBackend.launchd.rawValue {
-                try await restoreLaunchdTask(content: content)
+                try await restoreLaunchdTask(content: content, location: snapshot.location ?? .userAgent)
             } else if snapshot.backend == SchedulerBackend.cron.rawValue {
                 try await restoreCronTask(content: content, label: snapshot.taskLabel)
             }
@@ -747,7 +732,9 @@ class TaskListViewModel: ObservableObject {
         try await reinstallCronFromSnapshot(content: content)
     }
 
-    private func restoreLaunchdTask(content: String) async throws {
+    /// Restore into the domain the task was deleted from (System Daemon → /Library/LaunchDaemons, etc.),
+    /// so it runs as the same user it did before. Older snapshots without a location restore as user agents.
+    private func restoreLaunchdTask(content: String, location: TaskLocation) async throws {
         let data = Data(content.utf8)
         guard var parsedTask = LaunchdService.shared.parsePlistData(data) else {
             throw SchedulerError.invalidTask("Snapshot contains invalid plist data")
@@ -764,21 +751,25 @@ class TaskListViewModel: ObservableObject {
             throw SchedulerError.invalidTask("Snapshot failed validation: \(validationErrors.joined(separator: "; "))")
         }
 
-        // Re-generate a clean plist via PlistGenerator (applies XML escaping, control char stripping)
-        let cleanPlist = PlistGenerator().generate(for: parsedTask)
+        parsedTask.location = location
+        parsedTask.isReadOnly = false
+        parsedTask.plistFilePath = nil
 
-        let baseDir = TaskLocation.userAgent.directory
+        let baseDir = location.directory
         let plistURL = URL(fileURLWithPath: baseDir)
             .appendingPathComponent(parsedTask.plistFileName)
 
-        // Validate the write destination resolves within the LaunchAgents directory
+        // Validate the write destination resolves within the target launch directory
         let resolvedPath = plistURL.resolvingSymlinksInPath().path
         let resolvedDir = URL(fileURLWithPath: baseDir).resolvingSymlinksInPath().path
         guard resolvedPath.hasPrefix(resolvedDir + "/") else {
-            throw SchedulerError.invalidTask("Plist path resolves outside LaunchAgents directory")
+            throw SchedulerError.invalidTask("Plist path resolves outside \(baseDir)")
         }
 
-        try cleanPlist.write(toFile: plistURL.path, atomically: true, encoding: .utf8)
+        // install() re-generates a clean plist via PlistGenerator (XML escaping, control char
+        // stripping) and writes it with elevation for system locations; enable() loads it in
+        // the right domain
+        try await LaunchdService.shared.install(task: parsedTask)
         try await LaunchdService.shared.enable(task: parsedTask)
     }
 

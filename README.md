@@ -315,3 +315,5 @@ Zero external dependencies -- pure Swift/SwiftUI with Foundation.
 ## License
 
 MIT License
+
+Built by [Nevra](https://nevra.tech).
