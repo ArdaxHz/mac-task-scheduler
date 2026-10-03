@@ -187,7 +187,12 @@ actor TaskHistoryService {
             encoder.dateEncodingStrategy = .iso8601
 
             let data = try encoder.encode(allResults)
-            try data.write(to: historyFileURL, options: .atomic)
+            // Owner-only from creation — history holds task stdout/stderr
+            guard fileManager.createFile(atPath: historyFileURL.path, contents: data,
+                                         attributes: [.posixPermissions: 0o600]) else {
+                print("Failed to save history: could not write \(historyFileURL.path)")
+                return
+            }
         } catch {
             print("Failed to save history: \(error)")
         }

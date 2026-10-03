@@ -43,34 +43,28 @@ class CronService: SchedulerService {
     }
 
     func enable(task: ScheduledTask) async throws {
-        var currentCrontab = try await getCurrentCrontab()
-        let tag = task.cronTag
-
-        currentCrontab = currentCrontab.map { line in
-            if line.contains(tag) && line.hasPrefix("#") && !line.hasPrefix(tagPrefix) {
-                var uncommented = line
-                if let range = uncommented.range(of: "# ") {
-                    uncommented.removeSubrange(range)
-                }
-                return uncommented
-            }
-            return line
-        }
-
-        try await setCrontab(currentCrontab)
+        try await setCronLineEnabled(true, for: task)
     }
 
     func disable(task: ScheduledTask) async throws {
+        try await setCronLineEnabled(false, for: task)
+    }
+
+    /// The tag sits on its own line; the cron line it owns is the next one.
+    /// Disabled entries are stored as "# <cron line>" (see parseCronLine).
+    private func setCronLineEnabled(_ enabled: Bool, for task: ScheduledTask) async throws {
         var currentCrontab = try await getCurrentCrontab()
-        let tag = task.cronTag
-
-        currentCrontab = currentCrontab.map { line in
-            if line.contains(tag) && !line.hasPrefix("#") {
-                return "# \(line)"
-            }
-            return line
+        guard let tagIndex = currentCrontab.firstIndex(of: task.cronTag),
+              tagIndex + 1 < currentCrontab.count else {
+            throw SchedulerError.taskNotFound(task.id)
         }
-
+        let line = currentCrontab[tagIndex + 1]
+        let isDisabled = line.hasPrefix("# ")
+        if enabled && isDisabled {
+            currentCrontab[tagIndex + 1] = String(line.dropFirst(2))
+        } else if !enabled && !isDisabled {
+            currentCrontab[tagIndex + 1] = "# \(line)"
+        }
         try await setCrontab(currentCrontab)
     }
 
@@ -141,10 +135,9 @@ class CronService: SchedulerService {
     func isRunning(task: ScheduledTask) async -> Bool {
         do {
             let crontab = try await getCurrentCrontab()
-            let tag = task.cronTag
-            return crontab.contains { line in
-                line.contains(tag) && !line.hasPrefix("#")
-            }
+            guard let tagIndex = crontab.firstIndex(of: task.cronTag),
+                  tagIndex + 1 < crontab.count else { return false }
+            return !crontab[tagIndex + 1].hasPrefix("#")
         } catch {
             return false
         }
@@ -290,6 +283,18 @@ class CronService: SchedulerService {
         return "'" + sanitized.replacingOccurrences(of: "'", with: "'\\''") + "'"
     }
 
+    /// Quote an inline script. Multi-line scripts can't live on one cron line,
+    /// so they're base64-encoded and decoded at run time (alphabet is shell-safe).
+    private func quoteScript(_ script: String) -> String {
+        let cleaned = script.replacingOccurrences(of: "\0", with: "")
+        guard cleaned.contains("\n") || cleaned.contains("\r") else { return shellQuote(cleaned) }
+        return "\"$(echo \(Data(cleaned.utf8).base64EncodedString()) | /usr/bin/base64 -D)\""
+    }
+
+    // Matches the output of quoteScript for multi-line scripts
+    private static let base64ScriptPattern = try? NSRegularExpression(
+        pattern: #"^"\$\(echo ([A-Za-z0-9+/=]+) \| /usr/bin/base64 -D\)"$"#)
+
     private func generateCronLine(for task: ScheduledTask) -> String {
         guard let schedule = task.trigger.calendarSchedule else {
             return ""
@@ -308,17 +313,20 @@ class CronService: SchedulerService {
             }
         case .shellScript:
             if let script = task.action.scriptContent, !script.isEmpty {
-                command = "/bin/bash -c \(shellQuote(script))"
+                command = "/bin/bash -c \(quoteScript(script))"
             } else {
                 command = "/bin/bash \(shellQuote(task.action.path))"
             }
         case .appleScript:
             if let script = task.action.scriptContent, !script.isEmpty {
-                command = "/usr/bin/osascript -e \(shellQuote(script))"
+                command = "/usr/bin/osascript -e \(quoteScript(script))"
             } else {
                 command = "/usr/bin/osascript \(shellQuote(task.action.path))"
             }
         }
+
+        // Unescaped % is turned into a newline by cron
+        command = command.replacingOccurrences(of: "%", with: "\\%")
 
         let tag = task.cronTag
         return "\(tag)\n\(cronExpr.expression) \(command)"
@@ -341,7 +349,9 @@ class CronService: SchedulerService {
             return nil
         }
 
+        // Undo cron's % escaping; quoting is handled by shellSplit below
         let command = components.dropFirst(5).joined(separator: " ")
+            .replacingOccurrences(of: "\\%", with: "%")
 
         let uuid = ScheduledTask.uuidFromLabel(label)
         var task = ScheduledTask(id: uuid, launchdLabel: label)
@@ -353,30 +363,73 @@ class CronService: SchedulerService {
         )
         task.status.state = isDisabled ? .disabled : .enabled
 
-        if command.hasPrefix("/bin/bash -c") {
+        // Inline script: "<interpreter> <flag> <quoted or base64 script>"
+        for (prefix, type) in [("/bin/bash -c ", TaskActionType.shellScript),
+                               ("/usr/bin/osascript -e ", TaskActionType.appleScript)]
+        where command.hasPrefix(prefix) {
+            let quoted = String(command.dropFirst(prefix.count))
+            task.action.type = type
+            if let match = Self.base64ScriptPattern?.firstMatch(in: quoted, range: NSRange(quoted.startIndex..., in: quoted)),
+               let b64Range = Range(match.range(at: 1), in: quoted),
+               let data = Data(base64Encoded: String(quoted[b64Range])) {
+                task.action.scriptContent = String(decoding: data, as: UTF8.self)
+            } else {
+                task.action.scriptContent = Self.shellSplit(quoted).joined(separator: " ")
+            }
+            return task
+        }
+
+        let parts = Self.shellSplit(command)
+        guard let first = parts.first else { return nil }
+        if first == "/bin/bash" && parts.count == 2 {
             task.action.type = .shellScript
-            if let scriptRange = command.range(of: "-c '") {
-                let afterQuote = String(command[scriptRange.upperBound...])
-                if afterQuote.hasSuffix("'") && afterQuote.count > 1 {
-                    task.action.scriptContent = String(afterQuote.dropLast())
-                }
-            }
-        } else if command.hasPrefix("/usr/bin/osascript -e") {
+            task.action.path = parts[1]
+        } else if first == "/usr/bin/osascript" && parts.count == 2 {
             task.action.type = .appleScript
-            if let scriptRange = command.range(of: "-e '") {
-                let afterQuote = String(command[scriptRange.upperBound...])
-                if afterQuote.hasSuffix("'") && afterQuote.count > 1 {
-                    task.action.scriptContent = String(afterQuote.dropLast())
-                }
-            }
+            task.action.path = parts[1]
         } else {
             task.action.type = .executable
-            let parts = command.components(separatedBy: " ").filter { !$0.isEmpty }
-            guard !parts.isEmpty else { return nil }
-            task.action.path = parts[0]
+            task.action.path = first
             task.action.arguments = Array(parts.dropFirst())
         }
 
         return task
+    }
+
+    /// Minimal POSIX word splitting: single quotes, double quotes, backslash escapes.
+    /// No expansion — `$VAR` etc. are kept literally.
+    static func shellSplit(_ input: String) -> [String] {
+        var words: [String] = []
+        var current = ""
+        var inWord = false
+        var quote: Character?
+        var chars = Array(input)[...]
+
+        while let c = chars.popFirst() {
+            if quote == "'" {
+                if c == "'" { quote = nil } else { current.append(c) }
+            } else if quote == "\"" {
+                if c == "\"" {
+                    quote = nil
+                } else if c == "\\", let next = chars.first, "\"\\$`".contains(next) {
+                    current.append(chars.removeFirst())
+                } else {
+                    current.append(c)
+                }
+            } else if c == " " || c == "\t" {
+                if inWord { words.append(current); current = ""; inWord = false }
+            } else {
+                inWord = true
+                if c == "'" || c == "\"" {
+                    quote = c
+                } else if c == "\\", let next = chars.popFirst() {
+                    current.append(next)
+                } else {
+                    current.append(c)
+                }
+            }
+        }
+        if inWord { words.append(current) }
+        return words
     }
 }

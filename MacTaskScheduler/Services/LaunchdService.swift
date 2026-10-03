@@ -69,14 +69,12 @@ class LaunchdService: SchedulerService {
     // MARK: - Elevated Privilege Helpers
 
     /// Escape a string for embedding inside an AppleScript `do shell script "..."` context.
-    /// Must handle: backslash, double-quote, dollar sign, backtick, exclamation mark, newline, carriage return.
+    /// AppleScript string literals only recognise \\ and \" (plus \n \r \t); `\$` etc. are syntax errors.
+    /// Shell metacharacters are already neutralised by shellQuote() in the script itself.
     private func escapeForAppleScript(_ string: String) -> String {
         var result = string
         result = result.replacingOccurrences(of: "\\", with: "\\\\")
         result = result.replacingOccurrences(of: "\"", with: "\\\"")
-        result = result.replacingOccurrences(of: "$", with: "\\$")
-        result = result.replacingOccurrences(of: "`", with: "\\`")
-        result = result.replacingOccurrences(of: "!", with: "\\!")
         result = result.replacingOccurrences(of: "\n", with: "")
         result = result.replacingOccurrences(of: "\r", with: "")
         return result
@@ -98,17 +96,12 @@ class LaunchdService: SchedulerService {
     /// Write a file to a path, using elevated privileges if needed.
     private func writeFile(content: String, to path: String, elevated: Bool) async throws {
         if elevated {
-            // Write to temp file with restricted permissions atomically
-            let tempFile = fileManager.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".plist")
-            let data = Data(content.utf8)
-            guard fileManager.createFile(atPath: tempFile.path, contents: data,
-                                         attributes: [.posixPermissions: 0o600]) else {
-                throw SchedulerError.plistCreationFailed("Failed to create temp file")
-            }
-            defer { try? fileManager.removeItem(at: tempFile) }
-            let quotedTemp = shellQuote(tempFile.path)
+            // Embed the content in the privileged command itself. A user-writable temp file
+            // could be swapped by another process while the admin prompt is open.
+            // Base64's alphabet is shell- and AppleScript-safe.
+            let encoded = Data(content.utf8).base64EncodedString()
             let quotedPath = shellQuote(path)
-            try await executeElevated(script: "mv \(quotedTemp) \(quotedPath) && chmod 644 \(quotedPath) && chown root:wheel \(quotedPath)")
+            try await executeElevated(script: "echo \(encoded) | /usr/bin/base64 -D > \(quotedPath) && chmod 644 \(quotedPath) && chown root:wheel \(quotedPath)")
         } else {
             try content.write(toFile: path, atomically: true, encoding: .utf8)
         }
@@ -341,7 +334,14 @@ class LaunchdService: SchedulerService {
                 command: "/bin/launchctl",
                 arguments: ["list", label]
             )
-            return result.exitCode == 0
+            if result.exitCode == 0 { return true }
+            // System daemons (and agents loaded as root) live in the system domain,
+            // which `launchctl list` as the user can't see
+            let system = try await shellExecutor.execute(
+                command: "/bin/launchctl",
+                arguments: ["print", "system/\(label)"]
+            )
+            return system.exitCode == 0
         } catch {
             return false
         }
@@ -422,8 +422,36 @@ class LaunchdService: SchedulerService {
         let lastExitStatus: Int32
     }
 
-    /// Get all loaded launchd labels with PID and exit status in a single call.
+    /// Get all loaded launchd labels with PID and exit status.
+    /// `launchctl list` (run as the user) only sees the gui/<uid> domain, so system
+    /// daemons are merged in from `launchctl print system`.
     func getAllLoadedServices() async -> [String: LoadedServiceInfo] {
+        async let system = getSystemDomainServices()
+        let user = await getUserDomainServices()
+        return await system.merging(user) { _, userInfo in userInfo }
+    }
+
+    /// Parse the `services = { pid status label }` block of `launchctl print system`.
+    private func getSystemDomainServices() async -> [String: LoadedServiceInfo] {
+        guard let result = try? await shellExecutor.execute(
+            command: "/bin/launchctl", arguments: ["print", "system"], timeout: 10.0
+        ), result.exitCode == 0 else { return [:] }
+
+        var services: [String: LoadedServiceInfo] = [:]
+        var inServices = false
+        for line in result.standardOutput.components(separatedBy: "\n") {
+            if line == "\tservices = {" { inServices = true; continue }
+            guard inServices else { continue }
+            if line == "\t}" { break }
+            let parts = line.split(whereSeparator: \.isWhitespace)
+            guard parts.count == 3 else { continue }
+            let pid = Int(parts[0]).flatMap { $0 > 0 ? $0 : nil }
+            services[String(parts[2])] = LoadedServiceInfo(pid: pid, lastExitStatus: Int32(parts[1]) ?? 0)
+        }
+        return services
+    }
+
+    private func getUserDomainServices() async -> [String: LoadedServiceInfo] {
         do {
             let result = try await shellExecutor.execute(
                 command: "/bin/launchctl",
@@ -535,7 +563,9 @@ class LaunchdService: SchedulerService {
             task.action.path = args[0]
             task.action.arguments = Array(args.dropFirst())
 
-            if args[0].hasSuffix("bash") || args[0].hasSuffix("sh") || args[0].hasSuffix("zsh") {
+            // Match the binary name exactly — hasSuffix("sh") would also match /usr/bin/ssh
+            let binaryName = (args[0] as NSString).lastPathComponent
+            if ["bash", "sh", "zsh", "fish", "dash"].contains(binaryName) {
                 task.action.type = .shellScript
                 if args.count > 2 && args[1] == "-c" {
                     task.action.scriptContent = args[2]

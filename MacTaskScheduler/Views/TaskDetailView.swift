@@ -24,7 +24,8 @@ struct TaskDetailView: View {
         if task.action.type == .shellScript {
             // Check if path points to a script file (not a shell binary)
             let path = task.action.path
-            if !path.isEmpty && !path.hasSuffix("bash") && !path.hasSuffix("sh") && !path.hasSuffix("zsh") {
+            let shellNames = ["bash", "sh", "zsh", "fish", "dash"]
+            if !path.isEmpty && !shellNames.contains((path as NSString).lastPathComponent) {
                 return path
             }
             // Check arguments for script path

@@ -106,12 +106,9 @@ actor DockerCacheService {
             encoder.dateEncodingStrategy = .iso8601
             encoder.outputFormatting = .prettyPrinted
             let data = try encoder.encode(containers)
-            try data.write(to: url, options: .atomic)
-            // Set restrictive permissions — cache may contain env var secrets
-            try FileManager.default.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: url.path
-            )
+            // Owner-only from creation — cache may contain env var secrets
+            _ = FileManager.default.createFile(atPath: url.path, contents: data,
+                                               attributes: [.posixPermissions: 0o600])
         } catch {
             // Non-fatal: cache write failure doesn't affect app operation
         }

@@ -56,41 +56,50 @@ actor ShellExecutor {
         }
         process.environment = processEnv
 
-        do {
-            try process.run()
-        } catch {
-            throw SchedulerError.commandExecutionFailed("Failed to start process: \(error.localizedDescription)")
-        }
+        // Drain pipes while the process runs (avoids pipe-buffer deadlock).
+        // Non-blocking handlers so a grandchild holding the pipe open (`cmd &`)
+        // can't stall us after the process itself exits.
+        let stdoutBuf = BoundedBuffer(maxBytes: Self.maxOutputBytes)
+        let stderrBuf = BoundedBuffer(maxBytes: Self.maxOutputBytes)
+        outputPipe.fileHandleForReading.readabilityHandler = { stdoutBuf.consume($0) }
+        errorPipe.fileHandleForReading.readabilityHandler = { stderrBuf.consume($0) }
 
-        // Read pipes concurrently BEFORE waitUntilExit to avoid deadlock.
-        // If the process writes more than the pipe buffer (~64KB) and we only
-        // read after exit, both sides block forever.
-        let maxBytes = Self.maxOutputBytes
-        let outputData: Data
-        let errorData: Data
-        do {
-            async let stdoutData = Self.readPipeBounded(outputPipe, maxBytes: maxBytes)
-            async let stderrData = Self.readPipeBounded(errorPipe, maxBytes: maxBytes)
-            outputData = try await stdoutData
-            errorData = try await stderrData
-        } catch {
-            process.terminate()
-            throw SchedulerError.commandExecutionFailed("Failed reading process output: \(error.localizedDescription)")
-        }
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            process.terminationHandler = { _ in continuation.resume() }
+            do {
+                try process.run()
+            } catch {
+                process.terminationHandler = nil
+                continuation.resume()
+            }
+            guard process.processIdentifier > 0 else { return }
 
-        // Now safe to wait — pipes have been drained
-        let timeoutTask = Task.detached {
-            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-            if process.isRunning {
+            // Timeout starts at launch: SIGTERM, then SIGKILL if ignored.
+            let pid = process.processIdentifier
+            DispatchQueue.global().asyncAfter(deadline: .now() + timeout) {
+                guard process.isRunning else { return }
                 process.terminate()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
+                    if process.isRunning { kill(pid, SIGKILL) }
+                }
             }
         }
 
-        process.waitUntilExit()
-        timeoutTask.cancel()
+        guard process.processIdentifier > 0 else {
+            outputPipe.fileHandleForReading.readabilityHandler = nil
+            errorPipe.fileHandleForReading.readabilityHandler = nil
+            throw SchedulerError.commandExecutionFailed("Failed to start process: \(command)")
+        }
 
-        let output = String(data: outputData, encoding: .utf8) ?? ""
-        let error = String(data: errorData, encoding: .utf8) ?? ""
+        // Give the handlers up to 1s to deliver trailing output and EOF.
+        for _ in 0..<20 where !(stdoutBuf.isFinished && stderrBuf.isFinished) {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
+        outputPipe.fileHandleForReading.readabilityHandler = nil
+        errorPipe.fileHandleForReading.readabilityHandler = nil
+
+        let output = String(data: stdoutBuf.data, encoding: .utf8) ?? ""
+        let error = String(data: stderrBuf.data, encoding: .utf8) ?? ""
 
         return ShellResult(
             exitCode: process.terminationStatus,
@@ -99,37 +108,36 @@ actor ShellExecutor {
         )
     }
 
-    /// Read from a pipe with a bounded size limit to prevent memory exhaustion.
-    private static func readPipeBounded(_ pipe: Pipe, maxBytes: Int) async throws -> Data {
-        let handle = pipe.fileHandleForReading
-        return try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                var accumulated = Data()
-                var hitLimit = false
+    /// Thread-safe, size-bounded accumulator fed by a pipe's readabilityHandler.
+    private final class BoundedBuffer: @unchecked Sendable {
+        private let lock = NSLock()
+        private let maxBytes: Int
+        private var accumulated = Data()
+        private var hitLimit = false
+        private var finished = false
 
-                while true {
-                    let chunk = handle.availableData
-                    if chunk.isEmpty { break } // EOF
+        init(maxBytes: Int) { self.maxBytes = maxBytes }
 
-                    if !hitLimit {
-                        let remaining = maxBytes - accumulated.count
-                        if remaining > 0 {
-                            accumulated.append(chunk.prefix(remaining))
-                        }
-                        if accumulated.count >= maxBytes {
-                            hitLimit = true
-                        }
-                    }
-                    // Continue reading even after limit to drain the pipe and unblock the process
-                }
-
-                if hitLimit {
-                    let notice = "\n[... output truncated at \(maxBytes / 1024)KB ...]".data(using: .utf8) ?? Data()
-                    accumulated.append(notice)
-                }
-
-                continuation.resume(returning: accumulated)
+        func consume(_ handle: FileHandle) {
+            let chunk = handle.availableData
+            lock.lock(); defer { lock.unlock() }
+            if chunk.isEmpty { // EOF
+                finished = true
+                handle.readabilityHandler = nil
+                return
             }
+            // Keep draining past the limit so the process isn't blocked on a full pipe
+            let remaining = maxBytes - accumulated.count
+            if remaining > 0 { accumulated.append(chunk.prefix(remaining)) }
+            if accumulated.count >= maxBytes { hitLimit = true }
+        }
+
+        var isFinished: Bool { lock.lock(); defer { lock.unlock() }; return finished }
+
+        var data: Data {
+            lock.lock(); defer { lock.unlock() }
+            guard hitLimit else { return accumulated }
+            return accumulated + Data("\n[... output truncated at \(maxBytes / 1024)KB ...]".utf8)
         }
     }
 

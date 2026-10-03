@@ -132,39 +132,42 @@ class TaskListViewModel: ObservableObject {
             let cronService = CronService.shared
 
             log.info("Starting task discovery")
-            // Fetch launchd + cron + docker tasks in parallel
+            // Fetch all backends in parallel so a slow Docker/VM CLI only costs one timeout
             async let launchdResult = launchdService.discoverTasks()
             async let cronResult = cronService.discoverTasks()
-            let (launchdTasks, cronTasks) = try await (launchdResult, cronResult)
-            log.info("Discovered \(launchdTasks.count) launchd tasks, \(cronTasks.count) cron tasks")
 
             // Docker discovery is non-blocking — failure should not affect other backends
-            var dockerTasks: [ScheduledTask] = []
-            do {
-                dockerTasks = try await DockerService.shared.discoverTasks()
-                if !dockerTasks.isEmpty {
-                    log.info("Discovered \(dockerTasks.count) Docker containers")
+            async let dockerResult: [ScheduledTask] = {
+                do {
+                    return try await DockerService.shared.discoverTasks()
+                } catch {
+                    log.debug("Docker discovery skipped: \(error.localizedDescription)")
+                    return []
                 }
-            } catch {
-                log.debug("Docker discovery skipped: \(error.localizedDescription)")
-            }
+            }()
 
             // VM discovery — each backend is non-blocking, failures silently ignored
-            var vmTasks: [ScheduledTask] = []
-            let vmServices: [any SchedulerService] = [
-                ParallelsService.shared,
-                VirtualBoxService.shared,
-                UTMService.shared,
-                VMwareFusionService.shared
-            ]
-            for vmService in vmServices {
-                do {
-                    let tasks = try await vmService.discoverTasks()
-                    vmTasks.append(contentsOf: tasks)
-                } catch {
-                    // Silently ignore VM discovery errors (tool may not be installed)
+            async let vmResult: [ScheduledTask] = withTaskGroup(of: [ScheduledTask].self) { group in
+                let vmServices: [any SchedulerService] = [
+                    ParallelsService.shared,
+                    VirtualBoxService.shared,
+                    UTMService.shared,
+                    VMwareFusionService.shared
+                ]
+                for vmService in vmServices {
+                    // Tool may not be installed — ignore errors
+                    group.addTask { (try? await vmService.discoverTasks()) ?? [] }
                 }
+                return await group.reduce(into: []) { $0.append(contentsOf: $1) }
             }
+
+            let (launchdTasks, cronTasks) = try await (launchdResult, cronResult)
+            log.info("Discovered \(launchdTasks.count) launchd tasks, \(cronTasks.count) cron tasks")
+            let dockerTasks = await dockerResult
+            if !dockerTasks.isEmpty {
+                log.info("Discovered \(dockerTasks.count) Docker containers")
+            }
+            let vmTasks = await vmResult
 
             // Dedup by task ID (deterministic UUID from label) — prefer user-writable over read-only
             var tasksById: [UUID: ScheduledTask] = [:]

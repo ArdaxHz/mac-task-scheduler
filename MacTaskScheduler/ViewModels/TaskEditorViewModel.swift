@@ -393,15 +393,8 @@ class TaskEditorViewModel: ObservableObject {
             validationErrors.append("\(label) must be an absolute path")
             return
         }
-
-        // Reject paths in system-critical directories for writing
-        let systemDirs = ["/System", "/usr/bin", "/usr/sbin", "/sbin", "/bin"]
-        for dir in systemDirs {
-            if expanded.hasPrefix(dir + "/") || expanded == dir {
-                validationErrors.append("\(label) must not point to a system directory")
-                return
-            }
-        }
+        // No system-directory block here: these paths are only executed/read
+        // (e.g. /usr/bin/caffeinate). Writes go through validateOutputPath / isSafeScriptWritePath.
     }
 
     /// Validate an output path (stdout/stderr) for safety.
@@ -612,7 +605,7 @@ class TaskEditorViewModel: ObservableObject {
                 .components(separatedBy: " ")
                 .filter { !$0.isEmpty },
             workingDirectory: cleanWorkDir.isEmpty ? nil : cleanWorkDir,
-            environmentVariables: [:],
+            environmentVariables: editingTask?.action.environmentVariables ?? [:],
             scriptContent: inlineScript
         )
 

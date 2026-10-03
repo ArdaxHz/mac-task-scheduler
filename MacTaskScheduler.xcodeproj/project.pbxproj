@@ -480,7 +480,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 2026.03.06;
+				MARKETING_VERSION = 2026.10.03;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mactaskscheduler.app;
 				PRODUCT_NAME = "Mac Task Scheduler";
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
@@ -510,7 +510,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 2026.03.06;
+				MARKETING_VERSION = 2026.10.03;
 				PRODUCT_BUNDLE_IDENTIFIER = com.mactaskscheduler.app;
 				PRODUCT_NAME = "Mac Task Scheduler";
 				RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION = YES;
